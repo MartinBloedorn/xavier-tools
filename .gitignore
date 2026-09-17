@@ -1,0 +1,38 @@
+# CMake build trees
+build/
+build-*/
+out/
+cmake-build-*/
+
+# CMake artefacts that can land outside the build tree
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+install_manifest.txt
+
+# Editor / IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.swp
+*~
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Build output
+*.exe
+*.dll
+*.so
+*.so.*
+*.dylib
+*.lib
+*.a
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp

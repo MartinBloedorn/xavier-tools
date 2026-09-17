@@ -1,0 +1,22 @@
+# udev rule granting non-root access to the Emotiv EPOC USB receiver.
+#
+# Install with:
+#   sudo cp 99-emotiv-epoc.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# then unplug and replug the dongle.
+#
+# Without this, hidapi can enumerate the dongle (that only needs sysfs) but
+# hid_open_path() fails with a permission error, because /dev/hidrawN is
+# root-only by default. That is the single most common "it lists the device
+# but will not open it" failure on Linux.
+#
+# Unlike emokit's original rule, this does not rename the device node or run a
+# decryption daemon: xavier-tools talks to the standard hidraw node directly
+# and decrypts in-process.
+#
+# TAG+="uaccess" is the systemd mechanism that grants the locally logged-in
+# user access; the GROUP/MODE pair is a fallback for systems without it.
+# "plugdev" may not exist on your distro -- drop the GROUP= clause if so.
+
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="21a1", ATTRS{idProduct}=="0001", TAG+="uaccess", GROUP="plugdev", MODE="0660"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="21a1", ATTRS{idProduct}=="0001", TAG+="uaccess", GROUP="plugdev", MODE="0660"
