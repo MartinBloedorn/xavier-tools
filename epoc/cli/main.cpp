@@ -1,6 +1,8 @@
 // xavier-tools `epoc`: read the Emotiv EPOC's 14 EEG channels in real time.
 
+#include "epoc/dsp.hpp"
 #include "epoc/epoc.hpp"
+#include "epoc/osc.hpp"
 
 #include "terminal.hpp"
 
@@ -21,26 +23,47 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr const char* kProgram = "epoc";
-constexpr const char* kVersion = "0.1.0";
+#ifndef XAVIER_EPOC_VERSION
+#  define XAVIER_EPOC_VERSION "unknown"
+#endif
+constexpr const char* kVersion = XAVIER_EPOC_VERSION;
 
 /// Contact quality full-scale for the bar display. emokit's header notes that
 /// values above 4000 indicate a good contact; the units are otherwise
 /// undocumented, so this is a display convention, not a calibrated threshold.
 constexpr int kQualityGood = 4000;
 
+/// Rendered width of the live table, in columns. Kept as a constant so the
+/// narrow-terminal warning stays honest if the columns are ever changed.
+constexpr int kTableWidth = 99;
+
 struct Options {
     bool list = false;
     bool help = false;
     bool version = false;
     bool show_key = false;
+    /// Show band power as a percentage of each channel's total instead of
+    /// absolute uV^2.
+    bool relative = false;
     std::optional<std::size_t> index;
     std::optional<std::string> path;
     std::optional<std::string> serial;
-    std::optional<epoc::DeviceVariant> variant;
     std::chrono::milliseconds refresh{50};
     /// How long to wait for a candidate interface to produce its first
     /// packet before moving on to the next one.
     std::chrono::milliseconds settle{2000};
+    /// FFT window length in samples; must be a power of two.
+    std::size_t window = 256;
+    /// Keep listening when the dongle is present but the headset is silent,
+    /// instead of failing. The headset sleeps on its own, so this is the
+    /// friendlier default.
+    bool wait = true;
+
+    /// OSC destination ("host:port", or a bare port). Empty disables OSC.
+    std::optional<std::string> osc_target;
+    std::string osc_prefix = "/epoc";
+    std::string osc_messages = "tbrgy";
+    epoc::osc::TimestampFormat osc_timestamp = epoc::osc::TimestampFormat::Int64;
 };
 
 void print_usage(std::FILE* out) {
@@ -51,22 +74,61 @@ void print_usage(std::FILE* out) {
         "\n"
         "options:\n"
         "  -l, --list            list connected Emotiv dongles and exit\n"
-        "  -i, --index N         open the Nth dongle (default: 0)\n"
+        "  -i, --index N         open the Nth dongle (default: probe automatically)\n"
         "      --path PATH       open a specific HID path (see --list)\n"
         "      --serial SN       override the serial used for key derivation\n"
-        "      --consumer        force the consumer key layout\n"
-        "      --research        force the research key layout\n"
         "      --show-key        print the derived AES key and exit (debugging)\n"
         "      --refresh MS      display refresh interval, ms (default: 50)\n"
         "      --settle MS       per-interface probe timeout, ms (default: 2000)\n"
+        "      --no-wait         fail if the headset is not already streaming\n"
+        "  -w, --window N        FFT window in samples, power of two (default: 256)\n"
+        "  -r, --relative        show band power as %% of each channel's total\n"
+        "      --osc DEST        stream OSC to host:port (or a bare port)\n"
+        "      --osc-prefix P    OSC address prefix (default: /epoc)\n"
+        "      --osc-messages F  which OSC messages to send (default: tbrgy)\n"
+        "      --osc-timestamp T timestamp encoding: int64 (default), double,\n"
+        "                        int32 or timetag\n"
         "  -h, --help            show this help and exit\n"
         "  -V, --version         show version and exit\n"
         "\n"
-        "The dongle decrypts nothing by itself: data is AES-128 encrypted\n"
-        "against a key derived from the dongle's serial number. If channels\n"
-        "read as noise with a plausible-looking serial, try the other key\n"
-        "layout (--consumer / --research).\n",
+        "Band powers are computed per channel over a sliding window: 256 samples\n"
+        "is 2 s at 128 Hz, giving 0.5 Hz resolution. A longer window resolves the\n"
+        "low bands better but responds more slowly.\n"
+        "\n"
+        "OSC message flags, combined in any order:\n"
+        "  t  prepend a UNIX millisecond timestamp to every message\n"
+        "  r  per-channel raw samples:  <prefix>/raw/af3 <ts> <raw>\n"
+        "  b  per-channel band powers:  <prefix>/fft/af3 <ts> <delta> ... <gamma>\n"
+        "  u  all raw channels at once: <prefix>/raw/all <ts> <af3> <f7> ...\n"
+        "  g  gyro axes:                <prefix>/gyro/x and <prefix>/gyro/y\n"
+        "  y  battery charge, 0..1:     <prefix>/battery <ts> <level>\n"
+        "  q  contact quality:          appends <quality> to each raw message;\n"
+        "                               with u, also <prefix>/quality/all\n"
+        "Raw and gyro messages are sent per sample (128 Hz); band messages are sent\n"
+        "each time the spectrum is recomputed, i.e. once per --refresh interval.\n"
+        "Battery is sent once the first reading arrives and then only when the\n"
+        "charge changes, so it is a rare message rather than a stream.\n"
+        "The dongle reports quality for one electrode per packet, so quality/all is\n"
+        "sent about 34 times a second. q is not on by default: it changes how many\n"
+        "arguments the raw messages carry.\n"
+        "\n"
+        "OSC 1.0 only requires receivers to support int32, float32, string and\n"
+        "blob; int64, double and timetag are optional extensions. If your receiver\n"
+        "shows negative or nonsensical timestamps it is likely truncating the\n"
+        "int64 -- try --osc-timestamp double, or int32 for maximum portability.\n",
         kProgram, kVersion, kProgram);
+}
+
+bool parse_ms(const char* v, long lo, long hi, std::string_view flag,
+              std::chrono::milliseconds& out) {
+    const long ms = std::strtol(v, nullptr, 10);
+    if (ms < lo || ms > hi) {
+        std::fprintf(stderr, "%s: %.*s must be between %ld and %ld ms\n", kProgram,
+                     static_cast<int>(flag.size()), flag.data(), lo, hi);
+        return false;
+    }
+    out = std::chrono::milliseconds{ms};
+    return true;
 }
 
 /// Returns false and prints a diagnostic if the arguments are unusable.
@@ -90,10 +152,37 @@ bool parse_args(int argc, char** argv, Options& opts) {
             opts.version = true;
         } else if (a == "--show-key") {
             opts.show_key = true;
-        } else if (a == "--consumer") {
-            opts.variant = epoc::DeviceVariant::Consumer;
-        } else if (a == "--research") {
-            opts.variant = epoc::DeviceVariant::Research;
+        } else if (a == "-r" || a == "--relative") {
+            opts.relative = true;
+        } else if (a == "--no-wait") {
+            opts.wait = false;
+        } else if (a == "--osc") {
+            const char* v = need_value(i, a);
+            if (!v) return false;
+            opts.osc_target = v;
+        } else if (a == "--osc-prefix") {
+            const char* v = need_value(i, a);
+            if (!v) return false;
+            opts.osc_prefix = v;
+        } else if (a == "--osc-messages") {
+            const char* v = need_value(i, a);
+            if (!v) return false;
+            opts.osc_messages = v;
+            // Validate now: a typo here should fail before we open hardware.
+            epoc::osc::MessageFlags probe;
+            std::string error;
+            if (!epoc::osc::parse_message_flags(opts.osc_messages, probe, error)) {
+                std::fprintf(stderr, "%s: %s\n", kProgram, error.c_str());
+                return false;
+            }
+        } else if (a == "--osc-timestamp") {
+            const char* v = need_value(i, a);
+            if (!v) return false;
+            std::string error;
+            if (!epoc::osc::parse_timestamp_format(v, opts.osc_timestamp, error)) {
+                std::fprintf(stderr, "%s: %s\n", kProgram, error.c_str());
+                return false;
+            }
         } else if (a == "-i" || a == "--index") {
             const char* v = need_value(i, a);
             if (!v) return false;
@@ -108,22 +197,21 @@ bool parse_args(int argc, char** argv, Options& opts) {
             opts.serial = v;
         } else if (a == "--refresh") {
             const char* v = need_value(i, a);
-            if (!v) return false;
-            const long ms = std::strtol(v, nullptr, 10);
-            if (ms < 1 || ms > 10000) {
-                std::fprintf(stderr, "%s: --refresh must be between 1 and 10000 ms\n", kProgram);
-                return false;
-            }
-            opts.refresh = std::chrono::milliseconds{ms};
+            if (!v || !parse_ms(v, 1, 10000, a, opts.refresh)) return false;
         } else if (a == "--settle") {
             const char* v = need_value(i, a);
+            if (!v || !parse_ms(v, 100, 60000, a, opts.settle)) return false;
+        } else if (a == "-w" || a == "--window") {
+            const char* v = need_value(i, a);
             if (!v) return false;
-            const long ms = std::strtol(v, nullptr, 10);
-            if (ms < 100 || ms > 60000) {
-                std::fprintf(stderr, "%s: --settle must be between 100 and 60000 ms\n", kProgram);
+            const unsigned long n = std::strtoul(v, nullptr, 10);
+            if (n < 64 || n > 4096 || (n & (n - 1)) != 0) {
+                std::fprintf(stderr,
+                    "%s: --window must be a power of two between 64 and 4096 "
+                    "(64, 128, 256, 512, 1024, 2048, 4096)\n", kProgram);
                 return false;
             }
-            opts.settle = std::chrono::milliseconds{ms};
+            opts.window = static_cast<std::size_t>(n);
         } else {
             std::fprintf(stderr, "%s: unrecognised option '%.*s'\n", kProgram,
                          static_cast<int>(a.size()), a.data());
@@ -156,7 +244,7 @@ int do_list() {
     return 0;
 }
 
-/// Print the AES key the given serial and variant produce, and exit.
+/// Print the AES key a serial produces, and exit.
 ///
 /// Deliberately does not open or stream from the device: key derivation is
 /// pure, so this stays useful when the headset is off or absent, which is
@@ -181,29 +269,18 @@ int do_show_key(const Options& opts) {
         }
     }
 
-    // Without an open device we cannot read the feature report, so show both
-    // layouts unless the user pinned one.
+    const auto key = epoc::derive_key(serial);
     std::printf("serial: %s\n", serial.c_str());
-    const auto show = [&](epoc::DeviceVariant v) {
-        const auto key = epoc::derive_key(serial, v);
-        std::printf("%-9s", epoc::variant_name(v).data());
-        for (const auto b : key) std::printf(" %02x", b);
-        std::printf("\n");
-    };
-    if (opts.variant) {
-        show(*opts.variant);
-    } else {
-        std::printf("(variant not detected -- showing both layouts)\n");
-        show(epoc::DeviceVariant::Consumer);
-        show(epoc::DeviceVariant::Research);
-    }
+    std::printf("key:   ");
+    for (const auto b : key) std::printf(" %02x", b);
+    std::printf("\n");
     return 0;
 }
 
 /// Tracks a ~1 second window per channel so the display can show
 /// peak-to-peak amplitude, which is the quickest way to tell a live
 /// electrode from a flat one.
-class Window {
+class PeakWindow {
 public:
     void push(const epoc::Frame& f) {
         for (std::size_t c = 0; c < epoc::kChannelCount; ++c) {
@@ -275,93 +352,246 @@ private:
     std::deque<Clock::time_point> stamps_;
 };
 
-void draw(const epoc::cli::Terminal& term, const epoc::Device& dev, const epoc::Frame& f,
-          const Window& window, const DropCounter& drops, const RateMeter& rate,
-          long long samples, bool variant_forced) {
-    term.home();
+/// Emits OSC for each sample and each recomputed spectrum.
+///
+/// Addresses are built once up front rather than per message: at 128 Hz with
+/// per-channel raw output this runs ~1800 times a second, and rebuilding
+/// strings in that loop is pure waste.
+class OscStreamer {
+public:
+    OscStreamer(const std::string& target, const std::string& prefix,
+                const epoc::osc::MessageFlags& flags,
+                epoc::osc::TimestampFormat ts_format, std::int64_t start_ms)
+        : flags_(flags),
+          ts_format_(ts_format),
+          start_ms_(start_ms),
+          prefix_(epoc::osc::normalize_prefix(prefix)) {
+        std::string host;
+        std::string error;
+        std::uint16_t port = 0;
+        if (!epoc::osc::parse_endpoint(target, host, port, error)) {
+            throw epoc::Error(error);
+        }
+        sender_ = std::make_unique<epoc::osc::UdpSender>(host, port);
 
-    // Overwrite to end of line on every line so shorter rows cannot leave
-    // stale characters behind from a previous frame.
-    const char* eol = term.supports_ansi() ? "\x1b[K\n" : "\n";
-
-    std::printf("%s %s -- live EEG%s", kProgram, kVersion, eol);
-    std::printf("serial %-18s variant %s%s%s",
-                dev.serial().empty() ? "(unknown)" : dev.serial().c_str(),
-                epoc::variant_name(dev.variant()).data(),
-                variant_forced ? " (forced)" : " (detected)", eol);
-    std::printf("%s", eol);
-
-    std::printf(" chan      counts           uV     p2p/s uV   contact quality%s", eol);
-    std::printf(" ----      ------           --     --------   ---------------%s", eol);
-
-    for (const auto ch : epoc::kChannels) {
-        const auto i = static_cast<std::size_t>(ch);
-        const int p2p = window.peak_to_peak(i);
-        std::printf(" %-4s    %7d    %9.1f    %8.1f   %s %5d%s",
-                    epoc::channel_name(ch).data(),
-                    f.counts[i],
-                    f.counts[i] * epoc::kMicrovoltsPerCount,
-                    p2p * epoc::kMicrovoltsPerCount,
-                    epoc::cli::bar(f.quality[i], kQualityGood, 14).c_str(),
-                    f.quality[i],
-                    eol);
+        for (const auto ch : epoc::kChannels) {
+            const auto i = static_cast<std::size_t>(ch);
+            const std::string leaf = epoc::osc::address_channel(ch);
+            raw_addr_[i] = join("raw/" + leaf);
+            fft_addr_[i] = join("fft/" + leaf);
+        }
+        all_addr_ = join("raw/all");
+        gyro_x_addr_ = join("gyro/x");
+        gyro_y_addr_ = join("gyro/y");
+        battery_addr_ = join("battery");
+        quality_all_addr_ = join("quality/all");
     }
 
-    std::printf("%s", eol);
-    std::printf(" battery %3u%%    gyro x %+4d  y %+4d    seq %3u%s",
-                static_cast<unsigned>(f.battery), f.gyro_x, f.gyro_y,
-                static_cast<unsigned>(f.counter), eol);
-    std::printf(" samples %-10lld drops %-8lld  rate %6.1f Hz%s",
-                samples, drops.dropped(), rate.hz(), eol);
-    std::printf("%s", eol);
-    std::printf(" Ctrl+C to quit%s", eol);
-
-    std::fflush(stdout);
-}
-
-/// Append-only output for when stdout is not a terminal (piped or redirected).
-/// One compact line per refresh interval, so a redirect stays readable.
-void draw_plain(const epoc::Frame& f, const RateMeter& rate, long long samples,
-                long long dropped) {
-    std::printf("samples=%lld drops=%lld rate=%.1fHz seq=%u batt=%u%%",
-                samples, dropped, rate.hz(), static_cast<unsigned>(f.counter),
-                static_cast<unsigned>(f.battery));
-    for (const auto ch : epoc::kChannels) {
-        std::printf(" %s=%d", epoc::channel_name(ch).data(),
-                    f.counts[static_cast<std::size_t>(ch)]);
+    /// Append the timestamp in whichever encoding the user selected.
+    void add_timestamp(std::int64_t timestamp) {
+        switch (ts_format_) {
+            case epoc::osc::TimestampFormat::Int64:
+                message_.add(timestamp);
+                break;
+            case epoc::osc::TimestampFormat::Double:
+                message_.add(static_cast<double>(timestamp));
+                break;
+            case epoc::osc::TimestampFormat::Int32Relative:
+                // Milliseconds since the stream started. Wraps after ~24 days
+                // of continuous streaming, well past any plausible session,
+                // and stays inside the only integer type OSC guarantees a
+                // receiver understands.
+                message_.add(static_cast<std::int32_t>(timestamp - start_ms_));
+                break;
+            case epoc::osc::TimestampFormat::Timetag:
+                message_.add_timetag(epoc::osc::unix_ms_to_timetag(timestamp));
+                break;
+        }
     }
-    std::printf("\n");
-    std::fflush(stdout);
+
+    /// Per-sample messages. Called at the full 128 Hz sample rate.
+    void send_sample(std::int64_t timestamp, const epoc::Frame& f) {
+        if (flags_.raw) {
+            for (const auto ch : epoc::kChannels) {
+                const auto i = static_cast<std::size_t>(ch);
+                message_.reset(raw_addr_[i]);
+                if (flags_.timestamp) add_timestamp(timestamp);
+                message_.add(static_cast<std::int32_t>(f.counts[i]));
+                // Sticky: the last known reading for this electrode, not a
+                // measurement taken alongside this sample. Attached to every
+                // raw message so a receiver never has to join two streams to
+                // know whether a value is trustworthy.
+                if (flags_.quality) {
+                    message_.add(static_cast<std::int32_t>(f.quality[i]));
+                }
+                sender_->send(message_);
+            }
+        }
+        if (flags_.raw_bundle) {
+            message_.reset(all_addr_);
+            if (flags_.timestamp) add_timestamp(timestamp);
+            for (const auto ch : epoc::kChannels) {
+                message_.add(static_cast<std::int32_t>(f.counts[static_cast<std::size_t>(ch)]));
+            }
+            sender_->send(message_);
+        }
+        send_quality(timestamp, f);
+        if (flags_.gyro) {
+            // Two separate addresses rather than one message with two
+            // arguments, so a receiver can route each axis independently.
+            message_.reset(gyro_x_addr_);
+            if (flags_.timestamp) add_timestamp(timestamp);
+            message_.add(static_cast<std::int32_t>(f.gyro_x));
+            sender_->send(message_);
+
+            message_.reset(gyro_y_addr_);
+            if (flags_.timestamp) add_timestamp(timestamp);
+            message_.add(static_cast<std::int32_t>(f.gyro_y));
+            sender_->send(message_);
+        }
+        send_battery(timestamp, f);
+    }
+
+    /// Every electrode's contact quality at once, on refresh.
+    ///
+    /// Not sent per sample: a report carries quality for exactly one
+    /// electrode, named by byte 0, and only 34 of the 129 counter states name
+    /// one at all -- so a fresh reading exists about 34 times a second, and
+    /// sending per sample would repeat each one four times over. `Frame`
+    /// reports which electrode was refreshed precisely so this can be gated
+    /// on it; `quality` itself is sticky and cannot be tested for freshness.
+    ///
+    /// Every message carries the full set rather than just the electrode that
+    /// changed, so a receiver that joins mid-stream is complete within about
+    /// half a second. Paired with 'u' because it has the same shape as
+    /// /raw/all: one message, 14 values, channel order.
+    void send_quality(std::int64_t timestamp, const epoc::Frame& f) {
+        if (!flags_.quality || !flags_.raw_bundle || !f.quality_updated) return;
+
+        message_.reset(quality_all_addr_);
+        if (flags_.timestamp) add_timestamp(timestamp);
+        for (const auto ch : epoc::kChannels) {
+            message_.add(static_cast<std::int32_t>(f.quality[static_cast<std::size_t>(ch)]));
+        }
+        sender_->send(message_);
+    }
+
+    /// Battery charge, normalised to 0..1, on change only.
+    ///
+    /// Gated on is_battery_frame rather than on Frame::battery changing:
+    /// that field is sticky and reads 0 until the first battery frame
+    /// arrives, so a plain change test would announce a fictitious flat
+    /// battery at startup. The dongle substitutes a reading for the sequence
+    /// counter once a second, so the first real value follows the start of
+    /// the stream within a second, and after that this fires only when the
+    /// charge actually moves.
+    void send_battery(std::int64_t timestamp, const epoc::Frame& f) {
+        if (!flags_.battery || !f.is_battery_frame) return;
+        const int level = static_cast<int>(f.battery);
+        if (level == last_battery_) return;
+        last_battery_ = level;
+
+        message_.reset(battery_addr_);
+        if (flags_.timestamp) add_timestamp(timestamp);
+        message_.add(static_cast<float>(level) / 100.0f);
+        sender_->send(message_);
+    }
+
+    /// Band messages, sent whenever the spectrum is recomputed.
+    void send_bands(std::int64_t timestamp, const epoc::BandAnalyzer& bands) {
+        if (!flags_.bands) return;
+        for (const auto ch : epoc::kChannels) {
+            message_.reset(fft_addr_[static_cast<std::size_t>(ch)]);
+            if (flags_.timestamp) add_timestamp(timestamp);
+            for (const auto b : epoc::kBands) {
+                message_.add(static_cast<float>(bands.power(ch, b)));
+            }
+            sender_->send(message_);
+        }
+    }
+
+    bool sends_anything() const noexcept {
+        return flags_.raw || flags_.raw_bundle || flags_.bands || flags_.gyro ||
+               flags_.battery;
+    }
+    const epoc::osc::MessageFlags& flags() const noexcept { return flags_; }
+    epoc::osc::TimestampFormat timestamp_format() const noexcept { return ts_format_; }
+    const std::string& resolved_address() const noexcept {
+        return sender_->resolved_address();
+    }
+    const std::string& prefix() const noexcept { return prefix_; }
+    const std::string& endpoint() const noexcept { return sender_->endpoint(); }
+    unsigned long long sent() const noexcept { return sender_->sent(); }
+    unsigned long long failed() const noexcept { return sender_->failed(); }
+
+private:
+    std::string join(const std::string& tail) const {
+        return prefix_ == "/" ? "/" + tail : prefix_ + "/" + tail;
+    }
+
+    epoc::osc::MessageFlags flags_;
+    epoc::osc::TimestampFormat ts_format_;
+    std::int64_t start_ms_;
+    std::string prefix_;
+    std::unique_ptr<epoc::osc::UdpSender> sender_;
+    std::array<std::string, epoc::kChannelCount> raw_addr_;
+    std::array<std::string, epoc::kChannelCount> fft_addr_;
+    std::string all_addr_;
+    std::string gyro_x_addr_;
+    std::string gyro_y_addr_;
+    std::string battery_addr_;
+    std::string quality_all_addr_;
+    int last_battery_ = -1;  // no reading seen yet
+    epoc::osc::Message message_;  // reused across sends
+};
+
+/// Human-readable name for one candidate, for status messages.
+std::string candidate_label(const epoc::DeviceInfo& d) {
+    return d.interface_number >= 0
+               ? "interface " + std::to_string(d.interface_number)
+               : std::string("the selected device");
 }
 
-/// Open the dongle and return it only once it has actually produced a packet.
+/// Which interfaces to try, honouring an explicit --path or --index.
+///
+/// An explicit selection pins the list to exactly one interface -- it says
+/// *which* device to use. It deliberately does not say whether to wait for it:
+/// waiting is handled identically either way, so `--index 1` still tolerates a
+/// sleeping headset.
+std::vector<epoc::DeviceInfo> resolve_candidates(const Options& opts) {
+    if (opts.path) {
+        epoc::DeviceInfo d;
+        d.path = *opts.path;
+        return {d};
+    }
+    if (opts.index) {
+        // Indexes refer to bus order, matching how --list numbers them.
+        auto all = epoc::enumerate();
+        if (*opts.index >= all.size()) {
+            throw epoc::Error("device index " + std::to_string(*opts.index) +
+                              " is out of range; " + std::to_string(all.size()) +
+                              " Emotiv interface(s) present (see --list)");
+        }
+        return {all[*opts.index]};
+    }
+    return epoc::streaming_candidates();
+}
+
+/// Try each candidate interface once, returning the first that delivers a
+/// packet within `timeout`.
 ///
 /// This is the part that cannot be inferred from the enumeration: both HID
-/// interfaces open cleanly, but only one ever delivers a report. So when the
-/// user has not named an interface explicitly, try each candidate in turn and
-/// keep the first that speaks within `settle`.
-epoc::Device open_streaming(const Options& opts, epoc::Frame& first_frame) {
-    epoc::OpenOptions base;
-    base.serial_override = opts.serial;
-    base.variant_override = opts.variant;
-
-    // An explicit --path or --index is an instruction, not a hint: honour it
-    // exactly and let the read loop report silence if there is any.
-    if (opts.path || opts.index) {
-        epoc::OpenOptions o = base;
-        o.path = opts.path;
-        o.index = opts.index.value_or(0);
-        return epoc::Device(o);
-    }
-
-    const auto candidates = epoc::streaming_candidates();
-    if (candidates.empty()) {
-        throw epoc::Error("no Emotiv dongle found (looked for USB 21a1:0001); "
-                          "is the receiver plugged in?");
-    }
-
-    std::string report;
+/// interfaces open cleanly, but only one ever delivers a report, so the only
+/// way to identify it is to listen.
+std::optional<epoc::Device> probe_once(const epoc::OpenOptions& base,
+                                       const std::vector<epoc::DeviceInfo>& candidates,
+                                       std::chrono::milliseconds timeout,
+                                       epoc::Frame& first_frame,
+                                       std::string& report,
+                                       bool announce) {
     for (const auto& cand : candidates) {
+        if (epoc::cli::interrupted()) return std::nullopt;
+
         epoc::OpenOptions o = base;
         o.path = cand.path;
 
@@ -369,35 +599,265 @@ epoc::Device open_streaming(const Options& opts, epoc::Frame& first_frame) {
         try {
             dev.emplace(o);
         } catch (const epoc::Error& e) {
-            report += "  interface " + std::to_string(cand.interface_number) +
-                      ": could not open (" + e.what() + ")\n";
+            report += "  " + candidate_label(cand) + ": could not open (" + e.what() + ")\n";
             continue;
         }
 
-        std::fprintf(stderr, "%s: probing interface %d ...\n", kProgram, cand.interface_number);
-        if (dev->read_frame(first_frame, opts.settle)) {
-            std::fprintf(stderr, "%s: interface %d is streaming.\n", kProgram,
-                         cand.interface_number);
-            return std::move(*dev);
+        if (announce) {
+            std::fprintf(stderr, "%s: probing %s ...\n", kProgram,
+                         candidate_label(cand).c_str());
         }
-        report += "  interface " + std::to_string(cand.interface_number) +
-                  ": opened, but sent no data within " +
-                  std::to_string(opts.settle.count()) + " ms\n";
+        if (dev->read_frame(first_frame, timeout)) {
+            if (announce) {
+                std::fprintf(stderr, "%s: %s is streaming.\n", kProgram,
+                             candidate_label(cand).c_str());
+            }
+            return dev;
+        }
+        report += "  " + candidate_label(cand) + ": opened, but sent no data within " +
+                  std::to_string(timeout.count()) + " ms\n";
+    }
+    return std::nullopt;
+}
+
+/// Open the dongle and return it only once it has actually produced a packet.
+///
+/// Returns nullopt if the user interrupted before any data arrived.
+///
+/// The headset sleeps on its own, so "dongle present but silent" is a routine,
+/// recoverable state rather than an error: by default we keep listening until
+/// it wakes up, which means the tool can be started before the headset is
+/// switched on, in either order. A missing dongle is different -- that is a
+/// setup problem waiting will not fix -- so it still fails immediately.
+std::optional<epoc::Device> open_streaming(const Options& opts, epoc::Frame& first_frame) {
+    epoc::OpenOptions base;
+    base.serial_override = opts.serial;
+
+    auto candidates = resolve_candidates(opts);
+    if (candidates.empty()) {
+        throw epoc::Error("no Emotiv dongle found (looked for USB 21a1:0001); "
+                          "is the receiver plugged in?");
     }
 
-    throw epoc::Error(
-        "found the dongle but no interface is streaming EEG data.\n" + report +
-        "\nThe dongle encrypts and forwards whatever the headset sends, so silence\n"
-        "here means the headset itself is not transmitting. Check that it is\n"
-        "switched on and charged, and that it is paired with this dongle.\n"
-        "Use --settle to wait longer, or --index to force a specific interface.");
+    std::string report;
+    if (auto dev = probe_once(base, candidates, opts.settle, first_frame, report, true)) {
+        return dev;
+    }
+    if (epoc::cli::interrupted()) return std::nullopt;
+
+    if (!opts.wait) {
+        throw epoc::Error(
+            "found the dongle but no interface is streaming EEG data.\n" + report +
+            "\nThe dongle encrypts and forwards whatever the headset sends, so silence\n"
+            "here means the headset itself is not transmitting. Check that it is\n"
+            "switched on and charged, and that it is paired with this dongle.\n"
+            "Use --settle to wait longer, or --index to force a specific interface.");
+    }
+
+    // Waiting mode. Re-resolve candidates on every pass so unplugging and
+    // replugging the dongle is picked up too, and use a short per-interface
+    // timeout so Ctrl+C stays responsive and the headset is noticed promptly.
+    const auto retry_timeout = std::chrono::milliseconds{400};
+    const auto started = Clock::now();
+    const bool live_status = epoc::cli::Terminal::stderr_is_tty();
+    bool status_open = false;
+    long long last_note = 0;
+
+    std::fprintf(stderr,
+                 "%s: dongle is present but silent -- waiting for the headset.\n"
+                 "  Switch it on (and check it is charged); Ctrl+C to give up.\n"
+                 "  Use --no-wait to fail immediately instead.\n",
+                 kProgram);
+
+    while (!epoc::cli::interrupted()) {
+        try {
+            candidates = resolve_candidates(opts);
+        } catch (const epoc::Error&) {
+            // The dongle went away mid-wait; keep looking for it to come back.
+            candidates.clear();
+        }
+
+        if (!candidates.empty()) {
+            std::string ignored;
+            if (auto dev = probe_once(base, candidates, retry_timeout, first_frame,
+                                      ignored, false)) {
+                if (status_open) std::fprintf(stderr, "\n");
+                std::fprintf(stderr, "%s: headset is streaming.\n", kProgram);
+                return dev;
+            }
+        }
+        if (epoc::cli::interrupted()) break;
+
+        const auto secs = static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - started).count());
+        const char* what = candidates.empty() ? "waiting for dongle"
+                                              : "waiting for headset";
+        if (live_status) {
+            // Trailing spaces clear the tail of a previously longer line.
+            std::fprintf(stderr, "\r  %s... %llds        ", what, secs);
+            status_open = true;
+        } else if (secs >= last_note + 10) {
+            // Not a terminal: no in-place updates, so report periodically
+            // instead of spamming a log with one line per pass.
+            last_note = secs;
+            std::fprintf(stderr, "  %s... %llds\n", what, secs);
+        }
+        std::fflush(stderr);
+    }
+
+    if (status_open) std::fprintf(stderr, "\n");
+    return std::nullopt;
+}
+
+
+void draw(const epoc::cli::Terminal& term, const epoc::Device& dev, const epoc::Frame& f,
+          const PeakWindow& peaks, const epoc::BandAnalyzer& bands, const DropCounter& drops,
+          const RateMeter& rate, long long samples, bool relative,
+          const OscStreamer* osc) {
+    term.home();
+
+    // Overwrite to end of line on every line so shorter rows cannot leave
+    // stale characters behind from a previous frame.
+    const char* eol = term.supports_ansi() ? "\x1b[K\n" : "\n";
+
+    std::printf("%s %s -- live EEG%s", kProgram, kVersion, eol);
+    std::printf("serial %-18s  band power %s, %.1f s window, %.2f Hz bins%s",
+                dev.serial().empty() ? "(unknown)" : dev.serial().c_str(),
+                relative ? "as % of channel total" : "in uV^2",
+                bands.window_seconds(), bands.resolution_hz(), eol);
+    if (osc) {
+        std::printf("osc -> %-21s %s [%s]  sent %llu  dropped %llu%s",
+                    osc->endpoint().c_str(), osc->prefix().c_str(),
+                    epoc::osc::format_message_flags(osc->flags()).c_str(),
+                    osc->sent(), osc->failed(), eol);
+    }
+    std::printf("%s", eol);
+
+    // Build the header with the same field widths as the rows, so the columns
+    // cannot drift apart when either is edited.
+    std::printf(" %-4s %7s %8s %6s |", "chan", "counts", "uV", "p2p");
+    for (const auto b : epoc::kBands) std::printf(" %7s", epoc::band_name(b).data());
+    std::printf(" | %-14s %5s%s", "contact", "qual", eol);
+
+    std::printf(" %-4s %7s %8s %6s |", "----", "------", "--", "---");
+    for (std::size_t i = 0; i < epoc::kBandCount; ++i) std::printf(" %7s", "-----");
+    std::printf(" | %-14s %5s%s", "--------------", "-----", eol);
+
+    for (const auto ch : epoc::kChannels) {
+        const auto i = static_cast<std::size_t>(ch);
+        std::printf(" %-4s %7d %8.1f %6.1f |",
+                    epoc::channel_name(ch).data(),
+                    f.counts[i],
+                    f.counts[i] * epoc::kMicrovoltsPerCount,
+                    peaks.peak_to_peak(i) * epoc::kMicrovoltsPerCount);
+
+        if (!bands.ready()) {
+            for (std::size_t b = 0; b < epoc::kBandCount; ++b) std::printf(" %7s", "--");
+        } else if (relative) {
+            const double total = bands.total_power(ch);
+            for (const auto b : epoc::kBands) {
+                const double pct = (total > 0.0) ? 100.0 * bands.power(ch, b) / total : 0.0;
+                std::printf(" %6.1f%%", pct);
+            }
+        } else {
+            for (const auto b : epoc::kBands) {
+                std::printf(" %7.1f", bands.power(ch, b));
+            }
+        }
+
+        std::printf(" | %s %5d%s",
+                    epoc::cli::bar(f.quality[i], kQualityGood, 14).c_str(),
+                    f.quality[i], eol);
+    }
+
+    std::printf("%s", eol);
+    if (!bands.ready()) {
+        const double remaining =
+            static_cast<double>(bands.window_samples() - bands.filled()) /
+            epoc::kNominalSampleRateHz;
+        std::printf(" collecting spectrum: %.1f s to go%s", remaining, eol);
+    } else {
+        std::printf(" battery %3u%%    gyro x %+4d  y %+4d    seq %3u%s",
+                    static_cast<unsigned>(f.battery), f.gyro_x, f.gyro_y,
+                    static_cast<unsigned>(f.counter), eol);
+    }
+    std::printf(" samples %-10lld drops %-8lld  rate %6.1f Hz%s",
+                samples, drops.dropped(), rate.hz(), eol);
+    std::printf("%s", eol);
+
+    // The table is a fixed ~100 columns. Say so rather than letting it wrap
+    // into an unreadable mess with no explanation.
+    const int cols = epoc::cli::Terminal::width();
+    if (cols > 0 && cols < kTableWidth) {
+        std::printf(" note: terminal is %d columns, the table needs %d -- widen the"
+                    " window to stop it wrapping%s", cols, kTableWidth, eol);
+    }
+    std::printf(" Ctrl+C to quit%s", eol);
+
+    std::fflush(stdout);
+}
+
+/// Append-only output for when stdout is not a terminal (piped or redirected).
+/// One compact line per refresh interval, so a redirect stays readable.
+void draw_plain(const epoc::Frame& f, const epoc::BandAnalyzer& bands, const RateMeter& rate,
+                long long samples, long long dropped) {
+    std::printf("samples=%lld drops=%lld rate=%.1fHz seq=%u batt=%u%%",
+                samples, dropped, rate.hz(), static_cast<unsigned>(f.counter),
+                static_cast<unsigned>(f.battery));
+    for (const auto ch : epoc::kChannels) {
+        std::printf(" %s=%d", epoc::channel_name(ch).data(),
+                    f.counts[static_cast<std::size_t>(ch)]);
+    }
+    if (bands.ready()) {
+        for (const auto ch : epoc::kChannels) {
+            for (const auto b : epoc::kBands) {
+                std::printf(" %s.%s=%.1f", epoc::channel_name(ch).data(),
+                            epoc::band_name(b).data(), bands.power(ch, b));
+            }
+        }
+    }
+    std::printf("\n");
+    std::fflush(stdout);
 }
 
 int run(const Options& opts) {
-    epoc::Frame frame;  // reused: carries sticky battery/quality across reads
-    epoc::Device dev = open_streaming(opts, frame);
-
+    // Armed before opening, because open_streaming() may sit and wait for the
+    // headset and Ctrl+C has to get us out of that.
     epoc::cli::install_interrupt_handler();
+
+    // Set up OSC before touching the hardware: a bad destination must fail
+    // immediately rather than after a device probe, or worse, after sitting
+    // in the wait-for-headset loop.
+    const epoc::osc::MonotonicUnixClock osc_clock;
+    std::optional<OscStreamer> osc;
+    if (opts.osc_target) {
+        epoc::osc::MessageFlags flags;
+        std::string error;
+        // Already validated during argument parsing.
+        epoc::osc::parse_message_flags(opts.osc_messages, flags, error);
+        osc.emplace(*opts.osc_target, opts.osc_prefix, flags, opts.osc_timestamp,
+                    osc_clock.now_ms());
+        std::fprintf(stderr,
+                     "%s: streaming OSC to %s (%s), prefix %s, messages [%s], timestamp %s\n",
+                     kProgram, osc->endpoint().c_str(), osc->resolved_address().c_str(),
+                     osc->prefix().c_str(), epoc::osc::format_message_flags(flags).c_str(),
+                     epoc::osc::timestamp_format_name(opts.osc_timestamp).data());
+        if (!osc->sends_anything()) {
+            std::fprintf(stderr,
+                "%s: warning -- OSC is enabled but no message type is selected;\n"
+                "  add r, b, u, g or y to --osc-messages"
+                " (q only modifies r and u).\n", kProgram);
+        }
+    }
+
+    epoc::Frame frame;  // reused: carries sticky battery/quality across reads
+    auto opened = open_streaming(opts, frame);
+    if (!opened) {
+        std::fprintf(stderr, "%s: cancelled while waiting for the headset.\n", kProgram);
+        return 0;
+    }
+    epoc::Device dev = std::move(*opened);
+
     epoc::cli::Terminal term;
     const bool interactive = term.supports_ansi();
 
@@ -406,14 +866,11 @@ int run(const Options& opts) {
         term.show_cursor(false);
     }
 
-    Window window;
+    PeakWindow peaks;
+    epoc::BandAnalyzer bands(opts.window);
     DropCounter drops;
     RateMeter rate;
     long long samples = 0;
-
-    // The probe in open_streaming() already consumed one real packet (unless
-    // an explicit --index/--path skipped probing, in which case `frame` is
-    // still default-constructed and contributes nothing but a zero row).
     long long timeouts = 0;
 
     auto last_draw = Clock::now() - opts.refresh;
@@ -437,15 +894,25 @@ int run(const Options& opts) {
         ++samples;
         drops.observe(frame);
         rate.tick(Clock::now());
-        window.push(frame);
+        peaks.push(frame);
+        bands.push(frame);
+
+        // One timestamp per sample, shared by every message describing it.
+        const std::int64_t timestamp = osc ? osc_clock.now_ms() : 0;
+        if (osc) osc->send_sample(timestamp, frame);
 
         const auto now = Clock::now();
         if (now - last_draw >= opts.refresh) {
             last_draw = now;
+            // Recompute the spectra once per redraw rather than once per
+            // sample: 14 FFTs at 128 Hz would be wasted work nobody sees.
+            bands.compute();
+            if (osc && bands.ready()) osc->send_bands(timestamp, bands);
             if (interactive) {
-                draw(term, dev, frame, window, drops, rate, samples, opts.variant.has_value());
+                draw(term, dev, frame, peaks, bands, drops, rate, samples, opts.relative,
+                     osc ? &*osc : nullptr);
             } else {
-                draw_plain(frame, rate, samples, drops.dropped());
+                draw_plain(frame, bands, rate, samples, drops.dropped());
             }
         }
     }
@@ -456,6 +923,10 @@ int run(const Options& opts) {
     }
     std::fprintf(stderr, "%s: stopped after %lld samples (%lld dropped).\n",
                  kProgram, samples, drops.dropped());
+    if (osc) {
+        std::fprintf(stderr, "%s: sent %llu OSC messages to %s (%llu failed).\n",
+                     kProgram, osc->sent(), osc->endpoint().c_str(), osc->failed());
+    }
     return 0;
 }
 
@@ -476,16 +947,11 @@ int main(int argc, char** argv) {
     if (opts.list) {
         return do_list();
     }
-    if (opts.show_key) {
-        try {
-            return do_show_key(opts);
-        } catch (const epoc::Error& e) {
-            std::fprintf(stderr, "%s: %s\n", kProgram, e.what());
-            return 1;
-        }
-    }
 
     try {
+        if (opts.show_key) {
+            return do_show_key(opts);
+        }
         return run(opts);
     } catch (const epoc::Error& e) {
         std::fprintf(stderr, "%s: %s\n", kProgram, e.what());

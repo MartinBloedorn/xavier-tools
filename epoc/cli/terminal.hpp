@@ -30,6 +30,15 @@ public:
     /// True when stdout is an interactive terminal rather than a pipe/file.
     static bool stdout_is_tty() noexcept;
 
+    /// Same for stderr. Status chatter goes to stderr so that redirecting
+    /// stdout to a data file stays clean, but an in-place updating status
+    /// line is only appropriate when stderr is a terminal.
+    static bool stderr_is_tty() noexcept;
+
+    /// Terminal width in columns, or 0 if it cannot be determined. Queried
+    /// live rather than cached, so resizing mid-run is picked up.
+    static int width() noexcept;
+
     /// Move the cursor to the top-left corner without clearing scrollback.
     void home() const;
     /// Clear the whole visible screen and home the cursor.

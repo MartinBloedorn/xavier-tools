@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(xavier-tools
-    VERSION 0.1.0
+    VERSION 0.3.0
     DESCRIPTION "Tools for the Emotiv EPOC EEG headset"
     LANGUAGES CXX)
 

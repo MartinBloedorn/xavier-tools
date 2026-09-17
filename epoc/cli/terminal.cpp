@@ -12,6 +12,7 @@
 #  include <windows.h>
 #  include <io.h>
 #else
+#  include <sys/ioctl.h>
 #  include <unistd.h>
 #endif
 
@@ -32,6 +33,31 @@ bool Terminal::stdout_is_tty() noexcept {
     return _isatty(_fileno(stdout)) != 0;
 #else
     return isatty(STDOUT_FILENO) != 0;
+#endif
+}
+
+bool Terminal::stderr_is_tty() noexcept {
+#ifdef _WIN32
+    return _isatty(_fileno(stderr)) != 0;
+#else
+    return isatty(STDERR_FILENO) != 0;
+#endif
+}
+
+int Terminal::width() noexcept {
+#ifdef _WIN32
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (out != INVALID_HANDLE_VALUE && GetConsoleScreenBufferInfo(out, &info)) {
+        return info.srWindow.Right - info.srWindow.Left + 1;
+    }
+    return 0;
+#else
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+        return static_cast<int>(ws.ws_col);
+    }
+    return 0;
 #endif
 }
 
@@ -81,6 +107,13 @@ void install_interrupt_handler() {
     std::signal(SIGINT, on_sigint);
 #ifdef SIGTERM
     std::signal(SIGTERM, on_sigint);
+#endif
+#ifdef SIGBREAK
+    // Windows Ctrl+Break. On Windows these handlers run on a separate CRT
+    // thread while the main thread sits in a blocking read, which is fine:
+    // the handler only sets an atomic flag, and the main thread picks it up
+    // when its read times out.
+    std::signal(SIGBREAK, on_sigint);
 #endif
 }
 

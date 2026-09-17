@@ -62,37 +62,38 @@ void test_aes() {
 void test_key_derivation() {
     std::printf("key derivation\n");
 
-    // The worked example from emokit's doc/emotiv_protocol.asciidoc: serial
-    // SN20120526998912, consumer headset. NOTE: the expected value below is
-    // the one produced by emokit's *code* (C and Python agree). The prose in
-    // that same document specifies a different consumer layout; the
-    // discrepancy is real and is documented in derive_key(). This test pins
-    // the code-derived behaviour so a future change to it is deliberate.
-    const auto k = epoc::derive_key("SN20120526998912", epoc::DeviceVariant::Consumer);
-    check(hex(k.data(), k.size()) == "32003148320031543910384239003850",
-          "consumer layout for SN20120526998912");
+    // HARDWARE-VERIFIED VECTOR. This is the dongle this port was developed
+    // against, and this key is confirmed to decrypt its stream correctly on
+    // real hardware. If this assertion ever fails, decryption is broken --
+    // treat it as the canonical reference, not the doc example below.
+    const auto real = epoc::derive_key("SN201302043668GM");
+    check(hex(real.data(), real.size()) == "4d004754381036424d00474838003650",
+          "hardware-verified key for SN201302043668GM");
 
-    // Research layout for the same serial does match the prose exactly.
-    const auto r = epoc::derive_key("SN20120526998912", epoc::DeviceVariant::Research);
-    check(hex(r.data(), r.size()) == "32003154391038423200314839003850",
-          "research layout for SN20120526998912 (matches protocol doc)");
-
-    // The two layouts must actually differ, or variant selection is pointless.
-    check(k != r, "consumer and research keys differ");
+    // The worked example from emokit's doc/emotiv_protocol.asciidoc. The doc
+    // labels this layout "research"; it is the only layout we keep, and the
+    // doc and emokit's code agree on it (they disagreed only on the removed
+    // "consumer" layout).
+    const auto k = epoc::derive_key("SN20120526998912");
+    check(hex(k.data(), k.size()) == "32003154391038423200314839003850",
+          "protocol-doc example for SN20120526998912");
 
     // Only the last four characters participate, so a different prefix with
     // the same tail must give the same key. This is what lets --serial work.
-    const auto same_tail = epoc::derive_key("XX8912", epoc::DeviceVariant::Consumer);
-    check(same_tail == k, "only the last four serial characters matter");
+    check(epoc::derive_key("XX8912") == k, "only the last four serial characters matter");
 
     // emokit indexed the serial at a hardcoded offset of 16. A serial of a
     // different length must still key off its real last four characters.
-    const auto short_serial = epoc::derive_key("8912", epoc::DeviceVariant::Consumer);
-    check(short_serial == k, "short serial keys off its actual tail, not offset 16");
+    check(epoc::derive_key("8912") == k,
+          "short serial keys off its actual tail, not offset 16");
+
+    // Distinct dongles must yield distinct keys, or we would be decrypting
+    // everyone's stream with the same key.
+    check(real != k, "different serials give different keys");
 
     bool threw = false;
     try {
-        epoc::derive_key("abc", epoc::DeviceVariant::Consumer);
+        epoc::derive_key("abc");
     } catch (const epoc::Error&) {
         threw = true;
     }
@@ -193,6 +194,8 @@ void test_decode_packet() {
     epoc::decode_packet(packet, f);
     const int af3_quality = f.contact_quality(epoc::Channel::AF3);
     check(af3_quality != 0, "selector 2 updates AF3 contact quality");
+    check(f.quality_updated && *f.quality_updated == epoc::Channel::AF3,
+          "selector 2 names AF3 as the electrode refreshed");
 
     packet[0] = 3;  // now F7; AF3 must retain its value
     epoc::decode_packet(packet, f);
@@ -205,6 +208,26 @@ void test_decode_packet() {
     std::memset(packet + 13, 0xff, 3);
     epoc::decode_packet(packet, f);
     check(f.contact_quality(epoc::Channel::FC6) != 0, "selector 80 maps to FC6");
+    check(f.quality_updated && *f.quality_updated == epoc::Channel::FC6,
+          "selector 80 names FC6 as the electrode refreshed");
+
+    // Selectors outside 0..16 and 64..80 refresh nothing. The sticky values
+    // stay, but quality_updated must go empty -- that distinction is what the
+    // OSC layer gates /quality/all on, so a stale flag would turn a 34 Hz
+    // message into a 128 Hz one.
+    const int fc6_quality = f.contact_quality(epoc::Channel::FC6);
+    packet[0] = 40;
+    epoc::decode_packet(packet, f);
+    check(!f.quality_updated, "an unmapped selector refreshes no electrode");
+    check(f.contact_quality(epoc::Channel::FC6) == fc6_quality,
+          "an unmapped selector leaves the sticky values alone");
+
+    // Battery frames are the common case of that: byte 0 is >= 128, which no
+    // selector covers.
+    packet[0] = 0xff;
+    epoc::decode_packet(packet, f);
+    check(f.is_battery_frame && !f.quality_updated,
+          "a battery frame refreshes no electrode");
 }
 
 void test_channel_names() {

@@ -18,13 +18,6 @@
 namespace epoc {
 namespace {
 
-/// The dongle reports whether it is a consumer or research unit in a 9-byte
-/// HID feature report. A consumer unit answers with exactly this.
-constexpr std::size_t kFeatureReportSize = 9;
-constexpr std::uint8_t kFeatureReportId = 0;
-constexpr std::uint8_t kConsumerFeatureReport[kFeatureReportSize] = {
-    0x00, 0xa0, 0xff, 0x1f, 0xff, 0x00, 0x00, 0x00, 0x00};
-
 /// hid_init/hid_exit are global and not reference counted by hidapi itself, so
 /// we count them here; this keeps multiple concurrent Devices safe.
 class HidLibrary {
@@ -121,8 +114,6 @@ struct Device::Impl {
     HidGuard guard;
     hid_device* handle = nullptr;
     std::string serial;
-    DeviceVariant variant = DeviceVariant::Consumer;
-    bool variant_detected = false;
     std::array<std::uint8_t, 16> key{};
     std::unique_ptr<detail::Aes128Ecb> cipher;
 
@@ -130,32 +121,6 @@ struct Device::Impl {
         if (handle) hid_close(handle);
     }
 };
-
-namespace {
-
-/// Probe the feature report. Returns false if the device would not answer, in
-/// which case the caller falls back to the consumer layout (as emokit did,
-/// albeit by accident through integer conversion).
-bool detect_variant(hid_device* handle, DeviceVariant& out) {
-    unsigned char buf[kFeatureReportSize] = {};
-    buf[0] = kFeatureReportId;
-    const int n = hid_get_feature_report(handle, buf, sizeof(buf));
-    if (n != static_cast<int>(kFeatureReportSize)) {
-        return false;
-    }
-    // Anything that is not byte-for-byte the consumer report is assumed to be
-    // a research unit.
-    out = DeviceVariant::Consumer;
-    for (std::size_t i = 0; i < kFeatureReportSize; ++i) {
-        if (buf[i] != kConsumerFeatureReport[i]) {
-            out = DeviceVariant::Research;
-            break;
-        }
-    }
-    return true;
-}
-
-}  // namespace
 
 Device::Device(const OpenOptions& opts) : impl_(std::make_unique<Impl>()) {
     if (!detail::Aes128Ecb::self_test()) {
@@ -187,13 +152,6 @@ Device::Device(const OpenOptions& opts) : impl_(std::make_unique<Impl>()) {
                     "software holding the dongle.");
     }
 
-    if (opts.variant_override) {
-        impl_->variant = *opts.variant_override;
-        impl_->variant_detected = true;
-    } else {
-        impl_->variant_detected = detect_variant(impl_->handle, impl_->variant);
-    }
-
     if (opts.serial_override) {
         impl_->serial = *opts.serial_override;
     } else {
@@ -208,7 +166,7 @@ Device::Device(const OpenOptions& opts) : impl_(std::make_unique<Impl>()) {
         impl_->serial = narrow(wide);
     }
 
-    impl_->key = derive_key(impl_->serial, impl_->variant);
+    impl_->key = derive_key(impl_->serial);
     impl_->cipher = std::make_unique<detail::Aes128Ecb>(impl_->key);
 }
 
@@ -217,7 +175,6 @@ Device::Device(Device&&) noexcept = default;
 Device& Device::operator=(Device&&) noexcept = default;
 
 const std::string& Device::serial() const noexcept { return impl_->serial; }
-DeviceVariant Device::variant() const noexcept { return impl_->variant; }
 const std::array<std::uint8_t, 16>& Device::key() const noexcept { return impl_->key; }
 
 bool Device::read_frame(Frame& out, std::chrono::milliseconds timeout) {

@@ -59,13 +59,6 @@ inline constexpr std::array<Channel, kChannelCount> kChannels = {
 /// Electrode label, e.g. "AF3". Never null, valid for the program's lifetime.
 std::string_view channel_name(Channel c) noexcept;
 
-/// Headset class. This selects the crypto key layout and is normally detected
-/// from the dongle's HID feature report; it can be forced via OpenOptions
-/// when detection is unavailable or wrong.
-enum class DeviceVariant { Consumer, Research };
-
-std::string_view variant_name(DeviceVariant v) noexcept;
-
 /// One decrypted 32-byte report: a single 128 Hz sample across all channels.
 struct Frame {
     /// Sequence counter, 0..127. The dongle substitutes a battery reading for
@@ -79,9 +72,16 @@ struct Frame {
 
     /// Most recent contact-quality reading per channel. The dongle reports
     /// quality for one electrode per packet, so these are last-known values
-    /// refreshed at 1-16 Hz, not per-sample measurements. Raw units: emokit
-    /// treats >4000 as a good contact.
+    /// rather than per-sample measurements: each electrode is refreshed about
+    /// twice a second (four times for F8, AF4 and FC6, which the selector
+    /// table names twice). Raw units: emokit treats >4000 as a good contact.
     std::array<int, kChannelCount> quality{};
+
+    /// Which electrode this report carried a fresh quality reading for, or
+    /// nullopt when byte 0 held no quality selector -- which includes every
+    /// battery frame. Since `quality` is sticky, this is the only way to tell
+    /// a new reading from a value carried over from an earlier packet.
+    std::optional<Channel> quality_updated;
 
     int gyro_x = 0;
     int gyro_y = 0;
@@ -143,8 +143,6 @@ struct OpenOptions {
     /// Use this serial for key derivation instead of the one the dongle
     /// reports. For recovering from dongles that report a mangled serial.
     std::optional<std::string> serial_override;
-    /// Skip feature-report detection and assume this variant.
-    std::optional<DeviceVariant> variant_override;
 };
 
 /// An open dongle. Move-only; closes on destruction.
@@ -159,7 +157,6 @@ public:
     Device& operator=(const Device&) = delete;
 
     const std::string& serial() const noexcept;
-    DeviceVariant variant() const noexcept;
     /// The derived AES-128 key, for debugging against known-good keys.
     const std::array<std::uint8_t, 16>& key() const noexcept;
 
@@ -181,7 +178,12 @@ private:
 /// Derive the AES-128 key from a dongle serial. Only the last four characters
 /// of the serial participate. Throws Error if the serial is shorter than four
 /// characters.
-std::array<std::uint8_t, 16> derive_key(std::string_view serial, DeviceVariant variant);
+///
+/// emokit carried two key layouts, selected by a "consumer vs research" probe
+/// of a HID feature report. Only this one is kept: it is what real dongles
+/// use, it is the layout emokit's own Python port hardcoded, and it is
+/// hardware-verified here. See protocol.cpp for the details.
+std::array<std::uint8_t, 16> derive_key(std::string_view serial);
 
 /// Gather the 14 bits named by `bits` out of a decrypted packet into a 14-bit
 /// sample value. `bits[i]` supplies bit i of the result, so `bits[0]` is the

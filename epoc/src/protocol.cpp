@@ -75,10 +75,6 @@ std::string_view channel_name(Channel c) noexcept {
     return i < kChannelCount ? kChannelNames[i] : std::string_view{"??"};
 }
 
-std::string_view variant_name(DeviceVariant v) noexcept {
-    return v == DeviceVariant::Research ? "research" : "consumer";
-}
-
 int unpack_level(const std::uint8_t packet[kPacketSize],
                  const std::uint8_t bits[kChannelCount]) noexcept {
     int level = 0;
@@ -122,7 +118,7 @@ std::uint8_t battery_percent(std::uint8_t raw) noexcept {
     }
 }
 
-std::array<std::uint8_t, 16> derive_key(std::string_view serial, DeviceVariant variant) {
+std::array<std::uint8_t, 16> derive_key(std::string_view serial) {
     if (serial.size() < 4) {
         throw Error("dongle serial '" + std::string(serial) +
                     "' is too short to derive a key from (need at least 4 characters)");
@@ -136,25 +132,26 @@ std::array<std::uint8_t, 16> derive_key(std::string_view serial, DeviceVariant v
         return static_cast<std::uint8_t>(serial[n - back]);
     };
 
-    std::array<std::uint8_t, 16> k{};
-    if (variant == DeviceVariant::Consumer) {
-        k = {c(1), 0x00, c(2), 'H',
-             c(1), 0x00, c(2), 'T',
-             c(3), 0x10, c(4), 'B',
-             c(3), 0x00, c(4), 'P'};
-    } else {
-        k = {c(1), 0x00, c(2), 'T',
-             c(3), 0x10, c(4), 'B',
-             c(1), 0x00, c(2), 'H',
-             c(3), 0x00, c(4), 'P'};
-    }
-    // NOTE: emokit's doc/emotiv_protocol.asciidoc describes a *different*
-    // consumer layout, with the (n-1,n-2) and (n-3,n-4) pairs at offsets 4..10
-    // swapped relative to the above. The layout implemented here is the one in
-    // emokit's C and Python code, which is the path known to have worked
-    // against hardware, so it is the default. If decryption yields garbage on
-    // a consumer dongle, try --research (see README).
-    return k;
+    // emokit had a second layout for what it called "consumer" dongles,
+    // selected by comparing a HID feature report against a fixed pattern.
+    // It is gone, deliberately:
+    //
+    //  * A real EPOC dongle answers that feature report with
+    //    00 21 ff 1f ff 1e 00 00 00, which does not match emokit's "consumer"
+    //    pattern, so the probe selects *this* layout anyway.
+    //  * emokit's own Python port hardcoded this layout and ignored the probe
+    //    entirely, with a comment doubting the other branch was ever useful.
+    //  * This layout is the one verified working against hardware here, and it
+    //    is also the one emokit's doc/emotiv_protocol.asciidoc specifies (the
+    //    doc and code disagreed only on the removed layout).
+    //
+    // If a dongle ever turns up that needs the other arrangement, it is the
+    // (n-1,n-2) and (n-3,n-4) pairs at offsets 4..10 that move; see the git
+    // history of this file.
+    return {c(1), 0x00, c(2), 'T',
+            c(3), 0x10, c(4), 'B',
+            c(1), 0x00, c(2), 'H',
+            c(3), 0x00, c(4), 'P'};
 }
 
 void decode_packet(const std::uint8_t packet[kPacketSize], Frame& out) noexcept {
@@ -185,8 +182,10 @@ void decode_packet(const std::uint8_t packet[kPacketSize], Frame& out) noexcept 
     // Contact quality: one electrode per report, so this updates a sticky
     // per-channel value rather than the whole set.
     Channel q_channel{};
+    out.quality_updated.reset();
     if (quality_channel(packet[0], q_channel)) {
         out.quality[static_cast<std::size_t>(q_channel)] = unpack_level(packet, kQualityMask);
+        out.quality_updated = q_channel;
     }
 }
 
