@@ -5,11 +5,12 @@
  * its own buffers and its own canvas contents and nothing else.
  */
 
-import { Stream, Store, setOsc } from './lib/stream.js';
+import { Stream, Store, output, noteOutput, setOsc, setOutput } from './lib/stream.js';
 import { DataWidget } from './widgets/data.js';
 import { GyroWidget } from './widgets/gyro.js';
+import { AnalysisWidget } from './widgets/analysis.js';
 
-const WIDGETS = [DataWidget, GyroWidget];
+const WIDGETS = [DataWidget, GyroWidget, AnalysisWidget];
 /** No widget may be squeezed below a sixth of the window. */
 const MIN_FRACTION = 1 / 6;
 
@@ -21,6 +22,10 @@ const dom = {
   port: $('#osc-port'),
   prefix: $('#osc-prefix'),
   apply: $('#osc-apply'),
+  outPort: $('#out-port'),
+  outPrefix: $('#out-prefix'),
+  outApply: $('#out-apply'),
+  outSend: $('#out-send'),
   status: $('#status'),
   statusText: $('#status-text'),
   statusRate: $('#status-rate'),
@@ -58,6 +63,8 @@ stream.on('init', (meta) => {
     buildWidgets();
     bindTopBar();
     applyOscFields(meta.osc);
+    noteOutput(meta.output);
+    applyOutputFields(meta.output);
     applyCollapsed();
     rebuildStage();
     app.ready = true;
@@ -68,6 +75,8 @@ stream.on('init', (meta) => {
     // refreshed, and the buffers are dropped because they describe a
     // stream that has since had a gap in it.
     applyOscFields(meta.osc);
+    noteOutput(meta.output);
+    applyOutputFields(meta.output);
     for (const { instance } of app.panels.values()) instance.reset();
   }
 });
@@ -129,6 +138,17 @@ function bindTopBar() {
   dom.prefix.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyOsc(); });
   dom.apply.addEventListener('click', applyOsc);
 
+  const markOutDirty = () => { dom.outApply.disabled = false; };
+  dom.outPort.addEventListener('input', markOutDirty);
+  dom.outPrefix.addEventListener('input', markOutDirty);
+  dom.outPort.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyOutput(); });
+  dom.outPrefix.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyOutput(); });
+  dom.outApply.addEventListener('click', () => applyOutput());
+  // The send switch carries whatever is currently in the fields with it, so
+  // a port typed and then switched on does not need `apply` first -- which
+  // is exactly the sequence anyone setting up a receiver performs.
+  dom.outSend.addEventListener('click', () => applyOutput({ enabled: !output.enabled }));
+
   dom.play.addEventListener('click', () => setPaused(!app.store.ui.paused));
   setPaused(!!app.store.ui.paused);
 
@@ -171,6 +191,35 @@ async function applyOsc() {
     clearNotice();
   } catch (error) {
     dom.apply.disabled = false;
+    showNotice(String(error.message || error));
+  }
+}
+
+function applyOutputFields(stats) {
+  if (document.activeElement !== dom.outPort) dom.outPort.value = stats.port;
+  if (document.activeElement !== dom.outPrefix) dom.outPrefix.value = stats.prefix;
+  dom.outApply.disabled = true;
+  dom.outSend.setAttribute('aria-pressed', String(!!stats.enabled));
+  dom.outSend.title = stats.enabled
+    ? `Sending to ${stats.host}:${stats.port} -- click to stop`
+    : `Emit the analysis tools' OSC to ${stats.host}:${stats.port}`;
+}
+
+async function applyOutput(extra = {}) {
+  const port = parseInt(dom.outPort.value, 10);
+  if (!(port >= 1 && port <= 65535)) {
+    showNotice('output port must be between 1 and 65535');
+    return;
+  }
+  dom.outApply.disabled = true;
+  try {
+    const result = await setOutput({
+      port, prefix: dom.outPrefix.value || '/xavier', ...extra,
+    });
+    applyOutputFields(result.output);
+    clearNotice();
+  } catch (error) {
+    dom.outApply.disabled = false;
     showNotice(String(error.message || error));
   }
 }

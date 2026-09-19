@@ -19,6 +19,7 @@
 
 import { SampleRing } from '../lib/ring.js';
 import * as ui from '../lib/controls.js';
+import { OscOut, round3 } from '../lib/stream.js';
 import {
   FONT, FONT_LABEL, Smoothed, fmt, fitCanvas, hline, palette, placeholder, text, vline,
 } from '../lib/plot.js';
@@ -27,6 +28,7 @@ const VALUE_FONT = '15px ui-monospace, SFMono-Regular, Menlo, Consolas, monospac
 
 const MAX_WINDOW = 60;
 const WINDOW_CHOICES = [4, 8, 12, 24, 60];
+const SEND_CHOICES = [5, 10, 20, 30];
 const RATE_X = 0, RATE_Y = 1, ANGLE_X = 2, ANGLE_Y = 3;
 const TRAIL_SECONDS = 2.5;
 
@@ -57,6 +59,7 @@ export class GyroWidget {
     this.angleRange = new Smoothed(1);
     this.bubbleRate = new Smoothed(1);
     this.bubbleAngle = new Smoothed(1);
+    this.osc = new OscOut();
   }
 
   // -- data ---------------------------------------------------------------
@@ -83,6 +86,30 @@ export class GyroWidget {
       this.pitch = this.pitch * a + (ry - this.biasY) * dt * gain;
       this.ring.push(t[i], [rx, ry, this.yaw, this.pitch]);
     }
+    this.emit();
+  }
+
+  /** Stream the estimated head position, at most `sendHz` times a second.
+   *
+   * The angles and not the rates: a rate is what the hardware already
+   * sends, and anything downstream that wanted it can subscribe to
+   * `/epoc/gyro/x` directly. The estimate is the thing this widget makes.
+   *
+   * What goes out is exactly what is drawn -- arbitrary units, after the
+   * inversions, the gain and the leaky integrator. Deliberately *not*
+   * normalised against the bubble's auto-scale: that scale follows the last
+   * few seconds of movement, so the same head position would leave as a
+   * different number depending on what happened before it, which is
+   * indefensible for something driving a synth. `gain` is the knob for
+   * getting the magnitude a receiver wants, and it holds still.
+   */
+  emit() {
+    const s = this.settings;
+    if (!s.send) return;
+    this.osc.send(performance.now() / 1000, s.sendHz, () => [
+      { address: 'gyro/yaw', args: [round3(this.yaw)] },
+      { address: 'gyro/pitch', args: [round3(this.pitch)] },
+    ]);
   }
 
   /** Flip one axis's sign convention, the visible history included.
@@ -245,6 +272,20 @@ export class GyroWidget {
     gain.appendChild(ui.button('zero', () => this.zero(),
       'Take the last second as the resting rate and re-derive the angles'));
     bottom.appendChild(gain);
+
+    // Beside the two settings that decide what the angles *are*: what goes
+    // out is what they produce, so a receiver's idea of "level" changes
+    // with them, and having them on one row says so.
+    const osc = ui.group('osc');
+    const send = ui.toggle('send', s.send, (v) => save({ send: v }), { color: palette.ok });
+    send.title = 'Send <prefix>/gyro/yaw and <prefix>/gyro/pitch, in the same '
+      + 'arbitrary units shown here';
+    osc.appendChild(send);
+    const rate = ui.select(SEND_CHOICES.map((v) => [v, `${v} Hz`]), s.sendHz,
+      (v) => save({ sendHz: Number(v) }));
+    rate.title = 'How often they go out. The top bar’s "out" switch gates them.';
+    osc.appendChild(rate);
+    bottom.appendChild(osc);
   }
 
   // -- drawing ------------------------------------------------------------
@@ -397,6 +438,14 @@ export class GyroWidget {
     }
 
     if (hasReadout) this.drawReadout(ctx, cx + r + span.anchor, cy, rows);
+
+    // Whether the stream is running, in the corner the ring cannot reach.
+    // Chiefly for the case the switch here is on and the top bar's is not,
+    // which is otherwise completely silent.
+    const status = this.osc.status(s.send);
+    if (status && w > 260) {
+      text(ctx, status.text, x + w - 8, y + 9, palette[status.level], 'right', 'middle');
+    }
 
     const legendY = y + h - legendH / 2 - 2;
     const items = [];

@@ -25,10 +25,11 @@ view/
       app.js              top bar, widget layout, dividers, the frame loop
       lib/ring.js         typed-array ring buffers
       lib/plot.js         canvas primitives: axes, ticks, palette, smoothing
-      lib/stream.js       the SSE client and the config store
+      lib/stream.js       the SSE client, the config store, OSC output
       lib/controls.js     the controls that live in a parameter bar
       widgets/data.js     the data viewer
       widgets/gyro.js     the gyro viewer
+      widgets/analysis.js the analysis tool
   tools/
     fake_dat.py           synthetic EPOC over real UDP
     cdp.py                headless Chrome over the DevTools protocol
@@ -64,6 +65,11 @@ next datagram — which, if the headset is off, may be never.
 GIL makes finer-grained locking pointless here.
 
 **`server.py`** serves each browser from its own thread.
+
+**`sender.py`** is the way back out: the analysis tool posts its results and
+they leave as UDP OSC. `send_many` takes a whole result set under one lock,
+so the values describing one instant cannot straddle a re-point of the
+endpoint or interleave with another tool's.
 
 ### Fan-out is push, not cursor
 
@@ -105,8 +111,8 @@ show more.
 
 Data only ever flows one way. SSE needs no framing layer, the browser
 reconnects on its own, and `EventSource` is four lines. Control goes the
-other way as ordinary JSON POSTs, which is also how the analysis tools will
-ask for OSC to be emitted.
+other way as ordinary JSON POSTs, which is also how the analysis tool asks
+for its results to be emitted as OSC.
 
 The cost is one detail: the response has no `Content-Length` and no chunking,
 so the body is delimited by the close. That is valid HTTP/1.1 framing and
@@ -126,6 +132,20 @@ the case where no data is arriving.
 `state` is `waiting` (nothing ever seen), `live`, or `stalled` (nothing for
 1.5 s). A stalled rate is reported as zero rather than as the last measured
 figure: "128 Hz" beside a red dot would be actively misleading.
+
+### Nagle off
+
+`disable_nagle_algorithm = True` on the handler, which is `TCP_NODELAY`.
+
+Headers and body go out as two writes, so with Nagle on, the second waits
+for the peer to acknowledge the first — and the peer is delaying that
+acknowledgement. Measured from the page: **~96 ms for a sequential fetch
+that takes ~10 ms without it**, which put a ceiling of about six requests a
+second on anything the browser asks for in a loop. The analysis tool's OSC
+output is exactly that loop, and it went from 4.7 Hz to 7.2 Hz on the wire.
+
+It costs nothing here. The responses are single small writes to a loopback
+peer; there is no stream of tiny packets for Nagle to have been coalescing.
 
 ### Prefix diagnostics
 
@@ -272,6 +292,92 @@ One toggle per axis, not per series: yaw is the integral of x, so they flip
 together. A rate going one way and the angle derived from it going the other
 is a display that contradicts itself.
 
+### The analysis tool
+
+The maths is in [analysis.md](analysis.md) and the widget's own header
+comment; what is worth recording here is the three decisions that shape it.
+
+**It computes in the browser.** The band powers are already there, the
+parameters are already there, and the alternative — a second copy of the
+filters in Python, fed by a config the page also owns — would have two
+things to keep in step. The cost is honest and stated: no page, no output.
+
+**The ring holds deviations, not display values.** Each index is stored
+after the baseline is subtracted but before the range mapping, in ln units.
+Moving a range slider then re-scales the trail and the graphs that are
+already on screen, rather than putting a step in the middle of them at the
+moment of the drag — the same argument as the gyro's `invert()`, but for
+free, because the mapping is applied when drawing. The settings that change
+what an index *is* — `+AF3/4`, and a completed calibration — do drop the
+history, because for those there is no mapping that would make the old
+samples comparable.
+
+**The baseline is a high pass, and that is the point.** Subtracting a 30 s
+rolling mean makes a sustained state fade back to the middle. This surprises
+people, so the widget says which mode it is in, and `calibrate` freezes a
+baseline for when a value has to mean the same thing all evening. It is the
+same shape as the gyro's leaky integrator, for the same reason: an absolute
+reading nobody calibrated is worth less than a departure from rest.
+
+Two smaller ones. Band powers are the widget's clock — it updates on `fft`
+and ignores payloads without it — but the timestamp comes from the `raw`
+batch that arrived with it, so a graph's axis is in the same seconds the
+other widgets plot against. And a missing spectrum yields `NaN` rather than
+zero: zero through `ln()` is a very confident, very wrong reading, so the
+update is skipped instead.
+
+### Two graphs, one budget
+
+Each analysis can draw its indices against time under its own display, over
+the baseline window — the honest span for them, being exactly the stretch of
+time the current zero was computed from. Both are drawn by one routine
+taking a mapping per trace, and the mapping passed is the one the display
+above it uses, so a graph and the thing it is a history of cannot come to
+disagree about where 0.5 sits.
+
+Heights are settled from the bottom up. The cognitive section's contents are
+all of fixed size, so it is measured first and the emotion model takes what
+is left — its grid is the one elastic thing in the widget. A graph is the
+first thing dropped when there is not enough: a dot and a fader that read
+correctly matter more than the record behind them, and below about 150 px
+the grid stops being a grid. When two are asked for and only one fits,
+neither is drawn — one quietly missing would read as a fault in whichever
+index lost the draw, and they exist to be compared with each other. A
+section switched off folds to its header and yields the rest of its height,
+rather than holding a share of the widget for the words "analysis off".
+
+The emotion model's two traces share one colour, because the pink is the
+model's and giving half of it away would break the association with the dot.
+They are told apart by dashing and a caption, as in the gyro's graph — on a
+scrim, because there is no corner of a full strip a trace cannot wander
+into.
+
+### Emitting on the data path
+
+`emit()` hangs off `ingest`, not off the frame loop. A closed widget keeps
+sending — an installation may well leave the viewer in a background tab —
+and a paused one stops, which is right, because the values behind it have
+stopped too.
+
+Two widgets emit: the analysis tool's four values, and the gyro's estimated
+position. Both go through `OscOut` in `lib/stream.js`, one instance each,
+which holds the rate limit, the in-flight guard and the measured rate. What
+the gyro sends is what it draws — arbitrary units, after the flips, the gain
+and the leaky integrator — and pointedly not a value normalised against the
+bubble's auto-scale, which follows the last few seconds of movement and
+would therefore make one head position leave as a different number depending
+on what preceded it. `gain` is the knob for suiting a receiver, and it holds
+still. The rates are not sent at all: those are the headset's own, already
+on `/epoc/gyro/x`.
+
+One request is allowed in flight at a time, per stream. That bounds the
+cost of a slow reply to one stale value rather than a queue of them, and it
+makes the rate setting an upper bound: the browser's round trip is added to
+every period, so 10 Hz asked for is 7 to 8 Hz delivered, both widgets
+sending at once. The widget therefore displays
+the rate it **measures**, not the one it was set to. A stream claiming 30 Hz
+and delivering 6 would be worse than one that says 6.
+
 ### Pause
 
 Pausing stops ingestion into the widgets, not the stream. Status and battery
@@ -327,6 +433,15 @@ the 1/6 resize floor (at a 1572 px window, both clamps landed on 262 px),
 bar heights staying equal across widgets, pause actually freezing ingestion,
 prefix-mismatch and dead-port recovery, and a clean console throughout.
 
+One trap in it, found while working on the analysis tool: **after a
+`Runtime.evaluate`, the headless page often stops consuming its own SSE
+stream**, sometimes for the rest of the session. The server is unaffected —
+a Python client on `/api/stream` reads its 39 events a second throughout —
+so a widget that looks frozen in a `--eval` that follows an earlier one is
+an artefact of the harness. Anything about rates or throughput has to be
+measured on the wire (a UDP sink on the output port) or over a run with no
+evaluations in it.
+
 This is a gap worth naming: there is nothing that would catch a regression
 automatically. The OSC codec in particular is pure and would be easy to pin.
 
@@ -336,8 +451,11 @@ automatically. The OSC codec in particular is pure and would be easy to pin.
 - **Never run against real hardware.** Everything has been verified against
   `fake_dat.py`. The synthetic stream is a faithful reproduction of the
   message set, rates and encodings, but it is not a headset.
-- **The analysis-tool output path has no analysis tools.** `POST /api/emit`
-  works and is tested; nothing calls it.
+- **The analysis indices have never been checked against a person.** The
+  formulae are transcribed from [analysis.md](analysis.md) and verified to
+  compute what they say they compute, against a synthetic stream whose band
+  powers are known. Whether a given head's valence reads positive when that
+  person is happy is exactly the question `fake_dat.py` cannot answer.
 - **Only tested in Chrome.** Nothing used is Chrome-specific —
   `EventSource`, canvas 2D, ES modules, pointer events — but Firefox and
   Safari have not been opened.

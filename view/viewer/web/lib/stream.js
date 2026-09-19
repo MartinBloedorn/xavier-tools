@@ -75,11 +75,115 @@ export function setOsc(patch) {
   return postJSON('/api/osc', patch);
 }
 
-/** Emit one OSC message. Unused until the first analysis tool exists; see
- * the note in viewer/sender.py. */
-export function emitOsc(address, args = []) {
-  return postJSON('/api/emit', { address, args });
+/** The backend's OSC *output* endpoint, mirrored here.
+ *
+ * Two places need it -- the top bar, which edits it, and the analysis
+ * widget, which must not post results into a disabled sender at its send
+ * rate just to have them dropped. Plain object rather than another emitter:
+ * the widget reads it inside a frame it is already drawing, and a
+ * subscription would buy nothing over reading the field.
+ */
+export const output = {
+  enabled: false, host: '127.0.0.1', port: 9100, prefix: '/xavier',
+};
+
+/** Record the endpoint the backend reports -- from `init`, or from a reply
+ * to a change made here. */
+export function noteOutput(stats) {
+  if (stats) Object.assign(output, stats);
 }
+
+/** Change the OSC output endpoint. Persisted server-side. */
+export async function setOutput(patch) {
+  const result = await postJSON('/api/output', patch);
+  noteOutput(result.output);
+  return result;
+}
+
+/** Emit OSC on behalf of an analysis tool.
+ *
+ * Takes the whole result set at once: the values describe one instant and
+ * should travel together, and one request per value at the send rate would
+ * be four times the traffic for nothing.
+ */
+export async function emitOsc(messages) {
+  const result = await postJSON('/api/emit', { messages });
+  noteOutput(result.output);
+  return result;
+}
+
+/** One widget's outbound stream: a rate limit, a queue depth of one, and a
+ * record of what actually went out.
+ *
+ * Two widgets emit their own results now, and both want the same three
+ * things, none of which is obvious:
+ *
+ *   - only one request in flight at a time, because a slow reply must not
+ *     build a queue of stale values, each going out later than the one
+ *     after it is worth;
+ *   - a *measured* rate as well as the configured one -- a batch is one
+ *     POST and the browser's round trip is therefore added to every period,
+ *     so a stream asked for 30 Hz may well be delivering 7;
+ *   - the last error kept rather than thrown, since the caller is a frame
+ *     of a live display with nowhere to put an exception.
+ */
+export class OscOut {
+  constructor() {
+    this.lastSend = 0;
+    this.rate = 0;       // measured, not the setting
+    this.pending = false;
+    this.error = null;
+  }
+
+  /** True when nothing has gone out recently enough for `rate` to mean
+   * anything. */
+  get idle() {
+    return !this.rate || performance.now() / 1000 - this.lastSend > 2;
+  }
+
+  /** Send at most `hz` times a second. `build` is called only when a batch
+   * is actually due, and may return nothing to skip this one -- values that
+   * are not ready yet are better skipped than sent as zeros. */
+  send(wall, hz, build) {
+    if (!output.enabled || this.pending) return;
+    const period = 1 / Math.min(60, Math.max(1, hz));
+    if (wall - this.lastSend < period) return;
+    const messages = build();
+    if (!messages || !messages.length) return;
+
+    const gap = wall - this.lastSend;
+    // Ignore the first send and any gap long enough to be a resumption
+    // rather than a period: neither describes the rate of the stream.
+    if (this.lastSend && gap > 0 && gap < 5) {
+      this.rate = this.rate ? this.rate + (1 / gap - this.rate) * 0.2 : 1 / gap;
+    }
+    this.lastSend = wall;
+    this.pending = true;
+    emitOsc(messages)
+      .then(() => { this.error = null; })
+      .catch((error) => { this.error = String(error.message || error); })
+      .finally(() => { this.pending = false; });
+  }
+
+  /** What to show about this stream, or null when it is not running.
+   * `sending` is the widget's own switch; the top bar's is `output`.
+   *
+   * A level rather than a colour: this module knows about the link, not
+   * about the stylesheet, and the widget drawing the line has the palette
+   * in hand already.
+   */
+  status(sending) {
+    if (!sending) return null;
+    if (!output.enabled) return { text: 'osc output off', level: 'warn' };
+    if (this.error) return { text: `osc: ${this.error}`, level: 'bad' };
+    const rate = this.idle ? 'idle' : `${this.rate.toFixed(1)} Hz`;
+    return { text: `${output.prefix} · ${rate}`, level: 'faint' };
+  }
+}
+
+/** Round for the wire: three decimals is finer than any of these indices is
+ * meaningful to, and keeps the JSON small at the send rate. */
+export const round3 = (v) => Math.round(v * 1000) / 1000;
 
 /** The `ui` subtree of viewer.conf.json, mirrored in the browser.
  *

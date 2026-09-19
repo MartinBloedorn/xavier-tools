@@ -7,8 +7,8 @@ to install first.
 The live stream is **server-sent events** rather than a WebSocket. The data
 only ever flows one way, SSE needs no framing layer, and the browser
 reconnects on its own when the server restarts. Control goes the other way
-as ordinary JSON POSTs, which is also how the analysis tools will eventually
-ask for OSC to be emitted.
+as ordinary JSON POSTs, which is also how the analysis widget asks for its
+results to be emitted as OSC.
 """
 
 from __future__ import annotations
@@ -44,8 +44,31 @@ TICK_SECONDS = 1.0 / 40.0
 # intermediaries from timing out an idle response.
 HEARTBEAT_SECONDS = 0.25
 
+# Most a single /api/emit may carry. The analysis widget sends four and the
+# gyro two; the cap exists so a runaway loop in a page cannot turn one
+# request into a flood of datagrams.
+MAX_EMIT_BATCH = 64
+
 mimetypes.add_type("text/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
+
+
+def _osc_arg(value: Any) -> Any:
+    """Coerce one JSON argument to what it should be on the wire.
+
+    JSON has a single number type, so a valence that happens to land exactly
+    on zero arrives as ``int`` and would go out tagged ``i`` while every
+    other sample goes out tagged ``f``. A receiver that was parsing a float
+    stream then breaks, an hour into an installation, on the one value that
+    is arguably the most likely to occur. Numbers from this endpoint are
+    therefore always floats; booleans, which JSON does distinguish, are left
+    alone.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return float(value)
+    return value
 
 
 class ViewerServer:
@@ -116,6 +139,13 @@ def _make_handler(app: ViewerServer):
         protocol_version = "HTTP/1.1"
         server_version = "xavier-viewer"
         sys_version = ""
+        # Headers and body go out as two writes, so with Nagle on, the
+        # second one waits for the peer to acknowledge the first -- and the
+        # peer is delaying that acknowledgement. Measured from the page:
+        # ~96 ms for a sequential fetch that takes 10 ms without it, which
+        # put a ceiling of about 6 Hz on anything the browser asks for in a
+        # loop, the analysis tool's OSC output included.
+        disable_nagle_algorithm = True
 
         # -- plumbing ---------------------------------------------------
 
@@ -344,10 +374,37 @@ def _make_handler(app: ViewerServer):
             self._json(app.describe())
 
         def _post_output(self, payload: Dict[str, Any]) -> None:
-            app.sender.configure(
-                payload.get("host"), payload.get("port"),
-                payload.get("prefix"), payload.get("enabled"),
-            )
+            """Re-point or enable the OSC output. Persisted, like the input.
+
+            Validated rather than passed straight through: the port is typed
+            into the top bar now, and a typo there should come back as a
+            message beside the field, not as a traceback on the console.
+            """
+            port = payload.get("port")
+            if port is not None:
+                try:
+                    port = int(port)
+                except (TypeError, ValueError):
+                    self._error(400, "port must be a number")
+                    return
+                if not 1 <= port <= 65535:
+                    self._error(400, "port must be in 1..65535")
+                    return
+            host = payload.get("host")
+            if host is not None and not isinstance(host, str):
+                self._error(400, "host must be a string")
+                return
+            prefix = payload.get("prefix")
+            if prefix is not None and not isinstance(prefix, str):
+                self._error(400, "prefix must be a string")
+                return
+            enabled = payload.get("enabled")
+            # A bool, not anything truthy: `{"enabled": "false"}` from a
+            # hand-written request would otherwise switch the output *on*.
+            if enabled is not None and not isinstance(enabled, bool):
+                self._error(400, "enabled must be true or false")
+                return
+            app.sender.configure(host, port, prefix, enabled)
             stats = app.sender.stats()
             app.config.update({"output": {
                 "enabled": stats["enabled"], "host": stats["host"],
@@ -356,22 +413,46 @@ def _make_handler(app: ViewerServer):
             self._json(app.describe())
 
         def _post_emit(self, payload: Dict[str, Any]) -> None:
-            """Emit one OSC message on behalf of an in-viewer analysis tool.
+            """Emit OSC on behalf of an in-viewer analysis tool.
 
-            Nothing uses this yet. It is the seam the planning note asks for,
-            and having it exercised from the start means the first tool to
-            need it finds a working path rather than an untested one.
+            Either one message -- ``{"address": ..., "args": [...]}`` -- or a
+            batch under ``messages``. The analysis widget posts a batch:
+            valence and arousal describe the same instant, so they should
+            travel together, and one POST per value at the send rate would be
+            four times the requests for nothing.
+
+            Disabled output is not an error. The widget gates its own
+            streams on the state it mirrors from here, and a race between
+            the two -- the top bar switched off between one frame and the
+            next -- is routine rather than a fault; ``sent: 0`` says so.
             """
-            address = payload.get("address")
-            if not isinstance(address, str) or not address:
-                self._error(400, "address must be a non-empty string")
+            items = payload.get("messages")
+            if items is None:
+                items = [payload]
+            if not isinstance(items, list) or not items:
+                self._error(400, "messages must be a non-empty list")
                 return
-            args = payload.get("args", [])
-            if not isinstance(args, list):
-                self._error(400, "args must be a list")
+            if len(items) > MAX_EMIT_BATCH:
+                self._error(400, "at most {} messages per request"
+                            .format(MAX_EMIT_BATCH))
                 return
-            ok = app.sender.send(address, args)
-            self._json({"sent": ok, "output": app.sender.stats()})
+            batch = []
+            for item in items:
+                if not isinstance(item, dict):
+                    self._error(400, "each message must be an object")
+                    return
+                address = item.get("address")
+                if not isinstance(address, str) or not address:
+                    self._error(400, "address must be a non-empty string")
+                    return
+                args = item.get("args", [])
+                if not isinstance(args, list):
+                    self._error(400, "args must be a list")
+                    return
+                batch.append((address, [_osc_arg(arg) for arg in args]))
+            sent = app.sender.send_many(batch)
+            self._json({"sent": sent, "requested": len(batch),
+                        "output": app.sender.stats()})
 
     return Handler
 

@@ -33,3 +33,17 @@ Each channel is displayed as a realtime graph; graphs are stacked vertically, an
 #### Gyro viewer
 
 This displays the `gyro` messages, and computes the heads' approximate yaw (x) and pitch (y) position. The widget displays at its top a visualization akin to a "level bubble" (which shows a data point for x/y and another for yaw/pitch), an below it, a scrolling data graph. In the menu, the user can enable viewing the x,y and/or yaw/pitch data. To estimate yaw/pitch, we'll use "high-passed integration": integrate each gyro axis' value, but apply a slight high-pass to it (configurable in the UI) to ensure that the estimated position always slowly drifts back to zero, and not to some infinite value.
+
+#### Analysis tool
+
+> Note: this widget will required OSC output. Further widgets might require it too, so the setting should  be present in the global top horizonal menu bar. To avoid clutter, discrete separators and labels could be introduced between the current port/prefix/apply fields, the battery and osc link state, and the to-be-added out-port and OSC prefix (which shall default to 'xavier').
+
+This widget will enable computing both a 2D emotion model (valence/arousal) as well as a a cognitive state (focus vs. deep relaxation), and will allow outputting the computed values as OSC messages. These two analysis will be drawn on top of each other in the widget, each labeled accordinly.
+
+Technical details on how to implement these algorithms are described in view/doc/anaylsis.md; follow the requirements and implementation it outlines.
+
+At the top, the 2D emotion model should be displayed as a square grid; the computed value should be shown as a point in this grid, moving in real-time. The involved electrodes (F3, F4, F7, F8) should be noted discretely, to remind the user which sensors need to be installed in the EPOC. The computed values should be sent via OSC, in the form `<prefix>/pad/valence` and `<prefix>/pad/arousal`.
+
+Below the grid, two horizontal faders should reflect the computed focus and relaxation - the metrics seem to be rather independent, so I feel like a grid representation is somehow misleading. These values should be transmitted over OSC as `<prefix>/cog/focus` and `<prefix>/cog/relax`.
+
+The bottom menu could use the top row for emotion-model related options, and the bottom row for cognitive state; there should be toggles to enable/disable each of the analyses and their corresponding OSC streams, as well as settings for the low-pass-filtering frequency of the data for each analysis. For the emotion-model, allow adding AF3/AF4 signals for stability. Add any other relevant options that might arise during development.

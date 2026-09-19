@@ -34,9 +34,10 @@ DEFAULTS: Dict[str, Any] = {
         "port": 8420,
         "open_browser": True,
     },
-    # Where analysis tools will send their own OSC. Unused until the first
-    # such tool exists, but the endpoint is configurable from day one so the
-    # config file does not have to change shape later.
+    # Where the widgets that derive something send their own OSC. Every
+    # such stream is gated on `enabled`, which the top bar toggles, as well
+    # as on its own switch; host is editable here only, since the common
+    # case is a synth on this machine.
     "output": {
         "enabled": False,
         "host": "127.0.0.1",
@@ -51,6 +52,7 @@ DEFAULTS: Dict[str, Any] = {
         "layout": [
             {"id": "data", "open": True, "width": 2},
             {"id": "gyro", "open": False, "width": 1},
+            {"id": "analysis", "open": False, "width": 1},
         ],
         "data": {
             "channels": [True] * 14,
@@ -74,6 +76,35 @@ DEFAULTS: Dict[str, Any] = {
             "gain": 1.0,
             "windowSeconds": 12,
             "bubbleRange": 60,
+            # The estimated head position, as OSC. Off by default: the
+            # gyro's units are arbitrary, so a receiver has to be set up
+            # for them before the stream is any use.
+            "send": False,
+            "sendHz": 10,
+        },
+        # The analysis tool. Every number here is a display convention
+        # rather than a calibration -- see view/doc/analysis.md -- so all of
+        # them are exposed rather than baked in.
+        "analysis": {
+            # The 2D emotion model: frontal alpha asymmetry and beta/alpha.
+            "padOn": True,
+            "padSend": False,
+            "padUseAf": True,         # average AF3/AF4 in, for stability
+            "padStrip": True,         # plot the pair against time as well
+            "padHz": 0.3,             # low-pass cutoff for both indices
+            "padRange": 0.5,          # ln units at full deflection
+            # Cognitive state: focus, and the occipital alpha spike.
+            "cogOn": True,
+            "cogSend": False,
+            "cogStrip": True,
+            "cogHz": 0.3,
+            "focusRange": 0.5,        # ln units at full deflection
+            "relaxRange": 3.0,        # x baseline occipital alpha at full
+            "relaxTrigger": 0.6,      # fader value that reads as "eyes shut"
+            # Shared by both: what "resting" means, and how fast values go
+            # out over OSC.
+            "baselineSeconds": 30,
+            "sendHz": 10,
         },
     },
 }

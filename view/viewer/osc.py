@@ -2,8 +2,8 @@
 
 The C++ side hand-rolls its encoder and deliberately implements "only what
 this tool sends". This is the mirror of that: only what this tool needs to
-*receive*, plus a small encoder for the OSC the viewer will eventually emit
-from its own analysis tools.
+*receive*, plus a small encoder for the OSC the viewer's analysis tool emits
+from its own results.
 
 The two rules that govern the byte layout are the same ones documented in
 ``epoc/doc/osc.md``, and are the two that are easy to get wrong:

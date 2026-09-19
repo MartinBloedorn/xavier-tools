@@ -5,8 +5,10 @@ This file has contains unstructured notes and reminders by the author, and shoul
 -[ ] Add <peak_hz> <peak_val> to fft/<ch> message; add a corresponding toggeable-viewer, a stem plot that shares the FFT view. 
 -[ ] Add rate limiting to output.
 -[ ] Resent battery state every 5sec or so.
--[ ] Add sentiment analysis; see Gemini chat.
+-[x] Add sentiment analysis; see Gemini chat.
 -[ ] Viewer: gyro zero-ing should reset integrator state, so that the values go to zero immediately; affects only the new samples, not the previously existing graph.
+-[x] Add pitch/yaw OSC output.
+-[ ] Use LSL between CLI-DAT and viewer: https://labstreaminglayer.readthedocs.io/info/language_wrappers.html
 
 ---
 

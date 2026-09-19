@@ -16,6 +16,7 @@
   </div>
 
   <div class="group" role="group" aria-label="OSC input">
+    <span class="group-tag">in</span>
     <label class="field">
       <span class="field-label">port</span>
       <input id="osc-port" type="number" min="1" max="65535" step="1" class="input input-port" autocomplete="off">
@@ -27,6 +28,8 @@
     <button id="osc-apply" class="btn btn-quiet" disabled title="Re-point the OSC input and save it">apply</button>
   </div>
 
+  <div class="sep" role="presentation"></div>
+
   <div class="group group-status">
     <div id="status" class="status" title="OSC link state">
       <span class="dot"></span>
@@ -37,6 +40,22 @@
       <span class="battery-shell"><span id="battery-fill" class="battery-fill"></span></span>
       <span id="battery-text" class="battery-text">--</span>
     </div>
+  </div>
+
+  <div class="sep" role="presentation"></div>
+
+  <div class="group" role="group" aria-label="OSC output">
+    <span class="group-tag">out</span>
+    <label class="field">
+      <span class="field-label">port</span>
+      <input id="out-port" type="number" min="1" max="65535" step="1" class="input input-port" autocomplete="off">
+    </label>
+    <label class="field">
+      <span class="field-label">prefix</span>
+      <input id="out-prefix" type="text" class="input input-prefix" autocomplete="off" spellcheck="false">
+    </label>
+    <button id="out-apply" class="btn btn-quiet" disabled title="Save the OSC output endpoint">apply</button>
+    <button id="out-send" class="btn btn-toggle" aria-pressed="false" title="Emit the analysis tools' OSC">send</button>
   </div>
 
   <div class="spacer"></div>
@@ -53,6 +72,7 @@
   <div class="group group-widgets" role="group" aria-label="Widgets">
     <button class="btn btn-toggle" data-widget="data" aria-pressed="false">data</button>
     <button class="btn btn-toggle" data-widget="gyro" aria-pressed="false">gyro</button>
+    <button class="btn btn-toggle" data-widget="analysis" aria-pressed="false">analysis</button>
   </div>
 </header>
 

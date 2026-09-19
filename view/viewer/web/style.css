@@ -26,6 +26,14 @@
   --angle:      #a78bfa;
   --rate:       #38bdf8;
 
+  /* The analysis tool. The emotion point gets a hue of its own -- it is the
+   * only thing in the viewer that is an inference rather than a
+   * measurement, and it should not be mistaken for one. Focus and relax
+   * borrow the rate/angle hues: alert and calm, already in the palette. */
+  --pad:        #f472b6;
+  --focus:      #38bdf8;
+  --relax:      #a78bfa;
+
   --ok:         #3fb950;
   --warn:       #d6a02a;
   --bad:        #f2544b;
@@ -92,6 +100,22 @@ button, input, select { font: inherit; color: inherit; }
 .group { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .group-status { gap: 10px; }
 .spacer { flex: 1 1 auto; min-width: 8px; }
+
+/* The bar now carries two endpoints and the link state between them, which
+ * without marking reads as one long row of anonymous fields. A tag per
+ * group and a rule between them is the least that separates them. */
+.group-tag {
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: .8px;
+  text-transform: uppercase;
+}
+.sep {
+  flex: 0 0 1px;
+  align-self: center;
+  width: 1px; height: 20px;
+  background: var(--line);
+}
 
 .field { display: flex; align-items: center; gap: 5px; }
 .field-label { color: var(--ink-faint); font-size: 11px; }

@@ -8,7 +8,8 @@ items.
 
 ## Notes, Ideas & open features
 
-- Add rate limiting to OSC output?
+- Rate limiting on OSC output exists in the viewer's analysis tool (a send
+  rate, capped in the browser). The C++ side still has none.
 
 ## Feature state
 
@@ -29,6 +30,8 @@ items.
 | Linux build | **Never compiled** |
 | macOS build | **Never compiled** |
 | Viewer: OSC receive, HTTP/SSE, widgets | Verified end to end against a synthetic stream; **never run against a headset** |
+| Viewer: analysis tool (valence/arousal, focus/relax) | Computes what the formulae say, against a synthetic stream; the indices themselves are **unvalidated against a person** |
+| Viewer: OSC output | Verified on the wire — six addresses, float arguments, ~8 Hz sustained per stream from the browser |
 
 ## Hardware verification log
 
@@ -116,6 +119,19 @@ obvious first thing to pin, mirroring `test_osc.cpp` on the receive side.
 
 **The viewer has only been opened in Chrome.** Nothing it uses is
 Chrome-specific, but Firefox and Safari have not been tried.
+
+**The analysis indices are unvalidated as psychology.** The formulae in
+`view/doc/analysis.md` are implemented faithfully and produce the numbers
+they claim to from known band powers, but whether a particular head's
+valence reads positive when that person is happy has not been — and cannot
+be — checked against `fake_dat.py`. Every threshold in the widget is a
+display convention, which is why all of them are exposed as settings.
+
+**The viewer's OSC output rate is bounded by the browser.** A widget posts
+each result set to `/api/emit`, one request at a time, so the round trip is
+part of every cycle: a 10 Hz setting delivered 7 to 8 Hz on the wire in
+headless Chrome, with the analysis tool and the gyro both sending. Each
+widget displays the rate it measures rather than the one it was set to.
 
 ## Repository state
 

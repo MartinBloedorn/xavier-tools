@@ -361,7 +361,9 @@ epoc: streaming OSC to localhost:9000 (127.0.0.1), prefix /epoc, messages [tbrgy
 
 `view/` holds `xavier-viewer`, a browser view of that OSC stream: fourteen
 live traces, band powers overlaid on each, contact quality, gyro with an
-estimated head position, and battery.
+estimated head position, and battery — plus an analysis tool that reads a
+valence/arousal point and a focus/relaxation pair out of the band powers and
+sends them back out as OSC under its own prefix.
 
 ```
 epoc --osc 9000 --osc-messages tbugyq --osc-timestamp timetag
@@ -377,6 +379,14 @@ the packets, and it is what the viewer reads.
 
 Without a headset, `python view/tools/fake_dat.py --osc 9000` sends
 synthetic EPOC traffic over real UDP.
+
+The viewer's own output is switched on from its top bar and defaults to
+`/xavier` on port 9100: `/xavier/pad/valence`, `/xavier/pad/arousal`,
+`/xavier/cog/focus` and `/xavier/cog/relax` from the analysis tool, and
+`/xavier/gyro/yaw` and `/xavier/gyro/pitch` — the estimated head position,
+in the same arbitrary units the widget shows — from the gyro. All as floats,
+each stream switched on separately. The indices, the electrodes they need
+and their caveats are in [view/doc/analysis.md](view/doc/analysis.md).
 
 See [view/README.md](view/README.md) for the interface and the options.
 
