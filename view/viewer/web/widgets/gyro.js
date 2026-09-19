@@ -165,7 +165,28 @@ export class GyroWidget {
     this.bubbleAngle.reset(1);
   }
 
-  /** Take the recent mean as the resting rate and re-derive from zero. */
+  /** Take the recent mean as the resting rate, and put the head back at level.
+   *
+   * Zeroing is an *event*, not a parameter change, which is what makes it
+   * different from `invert` and the two sliders. Those re-derive the visible
+   * history through `recompute` so the graph never shows a step the head did
+   * not make. Here the step is the whole point -- the user is saying "level
+   * is here, now" -- so the integrator state is dropped rather than
+   * re-derived, and yaw and pitch read 0 from this instant on.
+   *
+   * Re-deriving was the bug: `recompute` restarts the integral at the oldest
+   * sample in the ring, so it walks the last few seconds of real movement
+   * back into the output through the leaky integrator's own memory (a couple
+   * of seconds at the default high-pass, more as it is lowered). The button
+   * then left the dot somewhere other than the centre, which reads as not
+   * having worked at all.
+   *
+   * The stored angle history is left as it was: it is a record of what was on
+   * screen, and rewriting it to zero would claim the head had been level all
+   * along. So the graph keeps a step at the moment of the click, and the
+   * bubble's trail walks in from wherever the estimate had drifted to --
+   * both being the honest picture of what happened.
+   */
   zero() {
     const ring = this.ring;
     const n = ring.size;
@@ -187,7 +208,14 @@ export class GyroWidget {
         this.biasY = sy / count;
       }
     }
-    this.recompute();
+    // The two halves of zeroing: the bias above stops the estimate drifting
+    // off again, and this drops the state it had accumulated so far. The
+    // scales follow the angles, so they are released too -- otherwise the
+    // ring stays zoomed out to a deflection that is no longer there.
+    this.yaw = 0;
+    this.pitch = 0;
+    this.angleRange.reset(1);
+    this.bubbleAngle.reset(1);
   }
 
   reset() {
@@ -270,7 +298,7 @@ export class GyroWidget {
       format: (v) => `×${v.toFixed(1)}`,
     }, (v) => { save({ gain: v }); this.recompute(); }));
     gain.appendChild(ui.button('zero', () => this.zero(),
-      'Take the last second as the resting rate and re-derive the angles'));
+      'Set yaw and pitch back to 0, taking the last second as the resting rate'));
     bottom.appendChild(gain);
 
     // Beside the two settings that decide what the angles *are*: what goes
