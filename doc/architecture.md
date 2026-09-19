@@ -4,7 +4,8 @@ How `xavier-tools` is put together, and why. This is the orientation document:
 read it first when picking up the project cold.
 
 Tool-specific internals live under the tool's own `doc/` directory —
-currently only [`epoc/doc/`](../epoc/doc/README.md).
+[`epoc/doc/`](../epoc/doc/README.md) for the acquisition tool and
+[`view/doc/`](../view/doc/architecture.md) for the viewer.
 
 ## Repository layout
 
@@ -35,4 +36,15 @@ xavier-tools/
       test_dsp.cpp          spectral analysis
       test_osc.cpp          OSC encoding and option parsing
     doc/                  EPOC-specific documentation
+  view/                   xavier-viewer — the web view for the OSC stream
+    xavier-viewer         entry point (Python 3.7+, no dependencies)
+    viewer/               backend: OSC decode, stream state, HTTP and SSE
+      web/                frontend: vanilla JS, canvas plotting, no build step
+    tools/                synthetic EPOC generator, headless-browser driver
+    doc/                  viewer-specific documentation
 ```
+
+The two tools share no code and are built and run independently — the viewer
+consumes `epoc`'s OSC output over UDP, which is the whole interface between
+them. That is deliberate: it also means any other OSC source, or a recording
+played back, drives the viewer just as well.

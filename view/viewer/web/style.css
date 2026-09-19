@@ -1,0 +1,486 @@
+/* xavier viewer -- a dark instrument panel.
+ *
+ * Dark only, deliberately: this is a scope. A light theme would wash out the
+ * traces, and the widget that matters most is a canvas whose palette is
+ * defined in JS anyway -- the two would have to be kept in sync for no gain.
+ * The canvas reads its colours from the custom properties below via
+ * getComputedStyle, so there is still exactly one place to change them.
+ */
+
+:root {
+  --bg:         #0a0d13;
+  --panel:      #11151d;
+  --panel-2:    #161b25;
+  --sunken:     #070a0f;
+  --line:       #232b39;
+  --line-soft:  #1a202b;
+
+  --ink:        #d5dce6;
+  --ink-dim:    #8b95a5;
+  --ink-faint:  #5a6373;
+
+  /* Traces are the vibrant half of the pair; bars are the faded half. */
+  --trace:      #2dd4bf;
+  --trace-2:    #7dd3a0;
+  --bars:       #f0a742;
+  --angle:      #a78bfa;
+  --rate:       #38bdf8;
+
+  --ok:         #3fb950;
+  --warn:       #d6a02a;
+  --bad:        #f2544b;
+
+  --topbar-h:   46px;
+  /* One height for every widget's parameter bar, as a single variable, so
+   * "the same across all widgets" is structural rather than a convention
+   * each widget has to remember. Two rows of controls: one row forced the
+   * bar to scroll sideways at any realistic widget width, and a control you
+   * have to scroll to reach may as well not be on the bar. */
+  --bar-row-h:  27px;
+  --bar-h:      calc(var(--bar-row-h) * 2);
+  --bar-h-min:  19px;
+  --radius:     5px;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  display: flex;
+  flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, select { font: inherit; color: inherit; }
+
+/* ---------------------------------------------------------------- top bar */
+
+.topbar {
+  flex: 0 0 var(--topbar-h);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px;
+  background: linear-gradient(var(--panel-2), var(--panel));
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.topbar::-webkit-scrollbar { height: 0; }
+
+.brand { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.brand-mark {
+  width: 9px; height: 9px; border-radius: 2px;
+  background: var(--trace);
+  box-shadow: 0 0 9px -1px var(--trace);
+  align-self: center;
+}
+.brand-name { font-weight: 650; letter-spacing: .3px; }
+.brand-sub  { color: var(--ink-faint); letter-spacing: .3px; }
+
+.group { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.group-status { gap: 10px; }
+.spacer { flex: 1 1 auto; min-width: 8px; }
+
+.field { display: flex; align-items: center; gap: 5px; }
+.field-label { color: var(--ink-faint); font-size: 11px; }
+
+.input {
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+  height: 25px;
+  font-variant-numeric: tabular-nums;
+  transition: border-color .12s, box-shadow .12s;
+}
+.input:focus {
+  outline: none;
+  border-color: var(--trace);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--trace) 18%, transparent);
+}
+.input-port   { width: 62px; }
+.input-prefix { width: 88px; }
+/* Spinners steal width from an already narrow field and nobody clicks them. */
+.input[type=number] { -moz-appearance: textfield; }
+.input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 25px;
+  padding: 0 9px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.btn:hover:not(:disabled) { background: #1d2431; color: var(--ink); }
+.btn:disabled { opacity: .4; cursor: default; }
+.btn:focus-visible { outline: 2px solid var(--trace); outline-offset: 1px; }
+.btn svg { fill: currentColor; flex: 0 0 auto; }
+
+.btn-quiet:not(:disabled) { color: var(--trace); border-color: color-mix(in srgb, var(--trace) 40%, var(--line)); }
+.btn-icon { padding: 0 9px 0 8px; }
+
+.btn-toggle[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--trace) 16%, var(--panel-2));
+  border-color: color-mix(in srgb, var(--trace) 55%, var(--line));
+  color: var(--trace);
+}
+/* Paused is a state the user must not miss, so it gets the loudest tint on
+ * the bar -- amber rather than the usual teal "on". */
+#play[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--bars) 18%, var(--panel-2));
+  border-color: color-mix(in srgb, var(--bars) 55%, var(--line));
+  color: var(--bars);
+}
+
+/* --------------------------------------------------------------- status */
+
+.status {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 9px 3px 7px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.status .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ink-faint);
+  flex: 0 0 auto;
+}
+.status.is-live    .dot { background: var(--ok);   box-shadow: 0 0 7px -1px var(--ok); animation: pulse 2.2s ease-in-out infinite; }
+.status.is-waiting .dot { background: var(--warn); }
+.status.is-stalled .dot { background: var(--bad);  box-shadow: 0 0 7px -1px var(--bad); }
+.status.is-offline .dot { background: var(--ink-faint); }
+@keyframes pulse { 50% { opacity: .45; } }
+
+.status-text { color: var(--ink-dim); }
+.status.is-live    .status-text { color: var(--ok); }
+.status.is-stalled .status-text { color: var(--bad); }
+.status-rate {
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.battery { display: flex; align-items: center; gap: 5px; }
+.battery-shell {
+  position: relative;
+  width: 24px; height: 11px;
+  border: 1px solid var(--ink-faint);
+  border-radius: 2px;
+  padding: 1.5px;
+}
+/* The terminal nub, so it reads as a battery at 11px tall. */
+.battery-shell::after {
+  content: ""; position: absolute; right: -3px; top: 3px;
+  width: 2px; height: 3px; border-radius: 0 1px 1px 0;
+  background: var(--ink-faint);
+}
+.battery-fill {
+  display: block; height: 100%; width: 0;
+  background: var(--ok); border-radius: 1px;
+  transition: width .4s ease, background .4s ease;
+}
+.battery-text {
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 26px;
+  font-size: 11px;
+}
+.battery.is-unknown .battery-fill { width: 0; }
+.battery.is-low  .battery-fill { background: var(--warn); }
+.battery.is-flat .battery-fill { background: var(--bad); }
+
+.notice[hidden] { display: none; }   /* display:flex would otherwise win over [hidden] */
+.notice {
+  display: flex; align-items: center; gap: 6px;
+  max-width: 46ch;
+  padding: 3px 9px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warn) 14%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--warn) 42%, var(--line));
+  color: var(--warn);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* --------------------------------------------------------------- stage */
+
+.stage {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.empty {
+  margin: auto;
+  text-align: center;
+  color: var(--ink-faint);
+}
+.empty-title { margin: 0 0 4px; font-size: 13px; color: var(--ink-dim); }
+.empty-hint  { margin: 0; }
+
+/* -------------------------------------------------------------- widgets */
+
+.widget {
+  flex: 1 1 0;
+  min-width: 0;          /* the JS resizer owns the real minimum */
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.widget-plot {
+  flex: 1 1 auto;
+  position: relative;
+  min-height: 0;
+  background: var(--sunken);
+}
+.widget-plot canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.widget-bar {
+  flex: 0 0 var(--bar-h);
+  height: var(--bar-h);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 0 8px;
+  background: linear-gradient(var(--panel), var(--panel-2));
+  border-top: 1px solid var(--line);
+  transition: flex-basis .16s ease, height .16s ease;
+  overflow: hidden;
+}
+.stage.bars-collapsed .widget-bar {
+  flex-basis: var(--bar-h-min);
+  height: var(--bar-h-min);
+}
+.stage.bars-collapsed .bar-body { opacity: 0; pointer-events: none; }
+
+.bar-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 0;
+  height: 100%;
+  transition: opacity .12s;
+}
+
+/* One row of groups. Each row scrolls on its own, so a crowded row cannot
+ * push its neighbour's controls out of reach. */
+.bar-row {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.bar-row + .bar-row { border-top: 1px solid var(--line-soft); }
+.bar-row::-webkit-scrollbar { height: 4px; }
+.bar-row::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+.bar-row::-webkit-scrollbar-track { background: transparent; }
+
+.bar-toggle {
+  flex: 0 0 auto;
+  width: 20px; height: 20px;
+  display: grid; place-items: center;
+  background: none; border: none; border-radius: 3px;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.bar-toggle:hover { background: var(--panel-2); color: var(--ink); }
+.stage.bars-collapsed .bar-toggle svg { transform: rotate(180deg); }
+
+/* Groups inside a parameter bar. The separator is a pseudo-element so the
+ * markup stays a flat list of controls. */
+.bar-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  position: relative;
+  padding-right: 7px;
+}
+.bar-group + .bar-group { padding-left: 7px; }
+.bar-group + .bar-group::before {
+  content: "";
+  position: absolute; left: 0; top: 50%;
+  width: 1px; height: 18px; margin-top: -9px;
+  background: var(--line);
+}
+/* Every group keeps its natural width and the row as a whole scrolls.
+ * Letting the widest group shrink instead always picked the channel
+ * toggles, which are the controls most worth being able to reach. */
+.bar-group.is-scroll { flex: 0 0 auto; }
+
+.bar-label {
+  color: var(--ink-faint);
+  font-size: 11px;
+  letter-spacing: .2px;
+  flex: 0 0 auto;
+}
+
+/* Channel chips: 14 of them, so they have to be small and legible. */
+.chip {
+  flex: 0 0 auto;
+  height: 21px;
+  padding: 0 7px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--ink-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background .1s, color .1s, border-color .1s;
+}
+.chip:hover { color: var(--ink); }
+.chip[aria-pressed="true"] {
+  color: #06100f;
+  font-weight: 600;
+  /* Set per chip in JS to the channel's own trace colour, so the toggle and
+   * the trace it controls are unmistakably the same thing. */
+  background: var(--chip, var(--trace));
+  border-color: var(--chip, var(--trace));
+}
+
+.seg {
+  display: inline-flex;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.seg button {
+  height: 21px;
+  padding: 0 8px;
+  background: none;
+  border: none;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-size: 11px;
+  transition: background .1s, color .1s;
+}
+.seg button:hover { color: var(--ink); }
+.seg button[aria-pressed="true"] { background: #222b3a; color: var(--ink); }
+.seg button + button { border-left: 1px solid var(--line); }
+
+.switch {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 21px; padding: 0 8px 0 6px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-size: 11px;
+}
+.switch:hover { color: var(--ink); }
+.switch .led {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--line);
+  box-shadow: none;
+}
+.switch[aria-pressed="true"] { color: var(--ink); }
+.switch[aria-pressed="true"] .led {
+  background: var(--led, var(--trace));
+  box-shadow: 0 0 6px -1px var(--led, var(--trace));
+}
+
+.num {
+  width: 52px; height: 21px;
+  padding: 0 5px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.num:focus { outline: none; border-color: var(--trace); }
+
+select.num { width: auto; padding-right: 2px; cursor: pointer; }
+
+.slider {
+  -webkit-appearance: none; appearance: none;
+  width: 78px; height: 21px;
+  background: none;
+  cursor: pointer;
+}
+.slider::-webkit-slider-runnable-track {
+  height: 3px; border-radius: 2px; background: var(--line);
+}
+.slider::-moz-range-track { height: 3px; border-radius: 2px; background: var(--line); }
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 11px; height: 11px; margin-top: -4px;
+  border-radius: 50%; background: var(--trace);
+  border: none;
+}
+.slider::-moz-range-thumb {
+  width: 11px; height: 11px; border: none;
+  border-radius: 50%; background: var(--trace);
+}
+.readout {
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  min-width: 42px;
+}
+
+/* ------------------------------------------------------------- dividers */
+
+.divider {
+  flex: 0 0 5px;
+  position: relative;
+  background: var(--line-soft);
+  cursor: col-resize;
+  touch-action: none;
+}
+.divider::after {
+  content: "";
+  position: absolute; inset: 0 -3px;   /* a wider grab target than it looks */
+}
+.divider::before {
+  content: "";
+  position: absolute; left: 2px; top: 50%;
+  width: 1px; height: 26px; margin-top: -13px;
+  background: var(--line);
+  transition: background .12s;
+}
+.divider:hover, .divider.is-dragging { background: color-mix(in srgb, var(--trace) 35%, var(--line-soft)); }
+.divider:hover::before, .divider.is-dragging::before { background: var(--trace); }
+
+body.is-resizing { cursor: col-resize; user-select: none; }
+body.is-resizing .widget-plot { pointer-events: none; }

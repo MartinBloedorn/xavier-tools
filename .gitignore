@@ -36,3 +36,8 @@ desktop.ini
 *.pdb
 *.ilk
 *.exp
+
+# Viewer state (created on first run, per-machine)
+view/viewer.conf.json
+__pycache__/
+*.pyc

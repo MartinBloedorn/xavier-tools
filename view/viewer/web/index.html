@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xavier viewer</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🧠</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-name">xavier</span><span class="brand-sub">viewer</span>
+  </div>
+
+  <div class="group" role="group" aria-label="OSC input">
+    <label class="field">
+      <span class="field-label">port</span>
+      <input id="osc-port" type="number" min="1" max="65535" step="1" class="input input-port" autocomplete="off">
+    </label>
+    <label class="field">
+      <span class="field-label">prefix</span>
+      <input id="osc-prefix" type="text" class="input input-prefix" autocomplete="off" spellcheck="false">
+    </label>
+    <button id="osc-apply" class="btn btn-quiet" disabled title="Re-point the OSC input and save it">apply</button>
+  </div>
+
+  <div class="group group-status">
+    <div id="status" class="status" title="OSC link state">
+      <span class="dot"></span>
+      <span id="status-text" class="status-text">connecting</span>
+      <span id="status-rate" class="status-rate"></span>
+    </div>
+    <div id="battery" class="battery is-unknown" title="Headset battery">
+      <span class="battery-shell"><span id="battery-fill" class="battery-fill"></span></span>
+      <span id="battery-text" class="battery-text">--</span>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div id="notice" class="notice" hidden></div>
+
+  <div class="group">
+    <button id="play" class="btn btn-icon" title="Pause the display (space)" aria-pressed="false">
+      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="3" y="2.5" width="3.5" height="11" rx="1"/><rect x="9.5" y="2.5" width="3.5" height="11" rx="1"/></svg>
+      <span class="btn-label">pause</span>
+    </button>
+  </div>
+
+  <div class="group group-widgets" role="group" aria-label="Widgets">
+    <button class="btn btn-toggle" data-widget="data" aria-pressed="false">data</button>
+    <button class="btn btn-toggle" data-widget="gyro" aria-pressed="false">gyro</button>
+  </div>
+</header>
+
+<main id="stage" class="stage">
+  <div id="empty" class="empty" hidden>
+    <p class="empty-title">No widgets open</p>
+    <p class="empty-hint">Use the buttons in the top right to open one.</p>
+  </div>
+</main>
+
+<template id="tpl-widget">
+  <section class="widget">
+    <div class="widget-plot"><canvas></canvas></div>
+    <div class="widget-bar">
+      <div class="bar-body"></div>
+      <button class="bar-toggle" title="Collapse the parameter bars">
+        <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true"><path d="M2 7.5 6 3.5l4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </section>
+</template>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

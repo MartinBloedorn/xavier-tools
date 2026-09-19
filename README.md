@@ -1,5 +1,10 @@
 # xavier-tools
 
+>[!IMPORTANT]
+>This repository is fully AI-generated, based on instructions that were prompted, or described in the `planning.md` files.
+
+![](doc/xavier-viewer.png)
+
 Tools for the (discontinued) Emotiv EPOC EEG headset.
 
 The first tool, `epoc`, reads all 14 EEG channels in real time from the
@@ -352,6 +357,29 @@ diagnose. To target IPv6 deliberately, give a bracketed literal such as
 epoc: streaming OSC to localhost:9000 (127.0.0.1), prefix /epoc, messages [tbrgy], timestamp int64
 ```
 
+## Web viewer
+
+`view/` holds `xavier-viewer`, a browser view of that OSC stream: fourteen
+live traces, band powers overlaid on each, contact quality, gyro with an
+estimated head position, and battery.
+
+```
+epoc --osc 9000 --osc-messages tbugyq --osc-timestamp timetag
+cd view && ./xavier-viewer
+```
+
+A Python backend receives the OSC and serves the page; both halves are
+dependency-free, so there is nothing to install and no build step. It opens
+a browser at <http://127.0.0.1:8420/>.
+
+`u` rather than `r`: `/raw/all` carries the same samples in a fourteenth of
+the packets, and it is what the viewer reads.
+
+Without a headset, `python view/tools/fake_dat.py --osc 9000` sends
+synthetic EPOC traffic over real UDP.
+
+See [view/README.md](view/README.md) for the interface and the options.
+
 ## Documentation
 
 This README covers building and running. Internals, rationale and project
@@ -369,6 +397,8 @@ cold or handing it to someone else.
 | [epoc/doc/osc.md](epoc/doc/osc.md) | OSC design, encoding rules, receiver interoperability |
 | [epoc/doc/testing.md](epoc/doc/testing.md) | Test coverage, gaps, and conventions |
 | [epoc/doc/decisions.md](epoc/doc/decisions.md) | Why things are the way they are, including rejected alternatives |
+| [view/README.md](view/README.md) | The web viewer: running it, the interface, configuration |
+| [view/doc/architecture.md](view/doc/architecture.md) | Viewer internals: the data path, rendering, and the decisions worth knowing |
 
 ## Troubleshooting
 
@@ -425,6 +455,11 @@ epoc/
   src/osc.cpp
   cli/                    the epoc command line tool
   test/                   hardware-free tests
+view/                     xavier-viewer: the web view for the OSC stream
+  xavier-viewer           entry point (Python, no dependencies)
+  viewer/                 backend: OSC receive, state, HTTP/SSE
+  viewer/web/             frontend: vanilla JS, canvas plotting
+  tools/                  synthetic EPOC generator, headless-browser driver
 cmake/GetHIDAPI.cmake     finds or fetches hidapi
 packaging/                Linux udev rule
 ```

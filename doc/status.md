@@ -28,6 +28,7 @@ items.
 | Wait-for-headset loop | Entry verified; the *wake-up transition* has not been observed |
 | Linux build | **Never compiled** |
 | macOS build | **Never compiled** |
+| Viewer: OSC receive, HTTP/SSE, widgets | Verified end to end against a synthetic stream; **never run against a headset** |
 
 ## Hardware verification log
 
@@ -102,6 +103,20 @@ cycle at the right moment. It reuses the verified `probe_once()`.
 `check()` helper and failure counter. The other two suites share `check.hpp`.
 Harmless, but it should be unified.
 
+**The viewer has never seen a headset.** `view/` was built and verified
+entirely against `view/tools/fake_dat.py`, which reproduces the message set,
+argument types, rates and timetag encoding over real UDP — so the decode
+path, the transport and every widget are exercised, but by synthetic data.
+The first run against hardware is the outstanding check.
+
+**The viewer has no automated tests.** Verification so far is a synthetic
+stream plus a scripted headless browser (`view/tools/cdp.py`); nothing would
+catch a regression on its own. `view/viewer/osc.py` is pure and would be the
+obvious first thing to pin, mirroring `test_osc.cpp` on the receive side.
+
+**The viewer has only been opened in Chrome.** Nothing it uses is
+Chrome-specific, but Firefox and Safari have not been tried.
+
 ## Repository state
 
 The git history has one commit — the initial generated iteration — and
@@ -112,7 +127,8 @@ everything since is uncommitted:
   `epoc/src/protocol.cpp`, `epoc/test/test_epoc.cpp`
 - Untracked: `epoc/include/epoc/dsp.hpp`, `epoc/include/epoc/osc.hpp`,
   `epoc/src/dsp.cpp`, `epoc/src/osc.cpp`, `epoc/test/check.hpp`,
-  `epoc/test/test_dsp.cpp`, `epoc/test/test_osc.cpp`, and this documentation
+  `epoc/test/test_dsp.cpp`, `epoc/test/test_osc.cpp`, all of `view/`, and
+  this documentation
 
 So the working tree is substantially ahead of `HEAD`. Committing has not been
 requested, and the branch is `master`.
