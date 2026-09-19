@@ -37,6 +37,13 @@ constexpr int kQualityGood = 4000;
 /// narrow-terminal warning stays honest if the columns are ever changed.
 constexpr int kTableWidth = 99;
 
+/// How often the battery level is resent over OSC even when it has not
+/// changed, so a receiver that joins mid-stream learns the charge without
+/// waiting for it to move. Only ever tested against a battery frame, which
+/// arrives about once a second, so the real gap is this rounded up to the
+/// next such frame -- close enough for a value that moves in 13 steps.
+constexpr auto kBatteryResend = std::chrono::seconds{5};
+
 struct Options {
     bool list = false;
     bool help = false;
@@ -106,8 +113,9 @@ void print_usage(std::FILE* out) {
         "                               with u, also <prefix>/quality/all\n"
         "Raw and gyro messages are sent per sample (128 Hz); band messages are sent\n"
         "each time the spectrum is recomputed, i.e. once per --refresh interval.\n"
-        "Battery is sent once the first reading arrives and then only when the\n"
-        "charge changes, so it is a rare message rather than a stream.\n"
+        "Battery is sent once the first reading arrives, then whenever the charge\n"
+        "changes and every 5 s regardless, so a receiver that joins late still\n"
+        "learns the level. It is a rare message rather than a stream.\n"
         "The dongle reports quality for one electrode per packet, so quality/all is\n"
         "sent about 34 times a second. q is not on by default: it changes how many\n"
         "arguments the raw messages carry.\n"
@@ -476,20 +484,29 @@ public:
         sender_->send(message_);
     }
 
-    /// Battery charge, normalised to 0..1, on change only.
+    /// Battery charge, normalised to 0..1: on change, and every
+    /// kBatteryResend regardless.
     ///
     /// Gated on is_battery_frame rather than on Frame::battery changing:
     /// that field is sticky and reads 0 until the first battery frame
     /// arrives, so a plain change test would announce a fictitious flat
     /// battery at startup. The dongle substitutes a reading for the sequence
     /// counter once a second, so the first real value follows the start of
-    /// the stream within a second, and after that this fires only when the
-    /// charge actually moves.
+    /// the stream within a second. Gating the resend on the same flag keeps
+    /// that guarantee: a level is never sent before one has been measured.
+    ///
+    /// The resend is what makes this useful to a receiver that joins
+    /// mid-stream: on a healthy headset the charge can sit on one value for
+    /// hours, and change-only semantics over UDP would leave such a receiver
+    /// with nothing at all. At one message every few seconds it is still a
+    /// rare message rather than a stream.
     void send_battery(std::int64_t timestamp, const epoc::Frame& f) {
         if (!flags_.battery || !f.is_battery_frame) return;
         const int level = static_cast<int>(f.battery);
-        if (level == last_battery_) return;
+        const auto now = Clock::now();
+        if (level == last_battery_ && now - last_battery_sent_ < kBatteryResend) return;
         last_battery_ = level;
+        last_battery_sent_ = now;
 
         message_.reset(battery_addr_);
         if (flags_.timestamp) add_timestamp(timestamp);
@@ -542,6 +559,7 @@ private:
     std::string battery_addr_;
     std::string quality_all_addr_;
     int last_battery_ = -1;  // no reading seen yet
+    Clock::time_point last_battery_sent_{};  // epoch: nothing sent yet
     epoc::osc::Message message_;  // reused across sends
 };
 

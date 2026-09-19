@@ -204,10 +204,10 @@ silent.
 
 <a id="adr-11"></a>
 
-## ADR 11 — Battery on change only, flagged `y`
+## ADR 11 — Battery on change plus a 5 s resend, flagged `y`
 
-`<prefix>/battery` carries a 0..1 float, sent when the first reading arrives
-and thereafter only when the value changes.
+`<prefix>/battery` carries a 0..1 float, sent when the first reading arrives,
+whenever the value changes, and every 5 s regardless.
 
 **Why not at literal startup**, as originally requested: `Frame::battery` is
 sticky and reads 0 until the first battery frame arrives, roughly a second
@@ -217,11 +217,19 @@ The trigger is `is_battery_frame && value != last`, which yields the first
 
 **Why `y` and not `b`:** `b` was already band powers.
 
-**Why no periodic resend:** a receiver started after `epoc` will not see the
-level until it next changes, which is a genuine limitation of change-only
-semantics over UDP. The requested behaviour was change-only, so that is what
-was built, and the limitation is documented in the README rather than
-silently designed around.
+**Why a periodic resend** (2026-09-20, superseding the original change-only
+design): a receiver started after `epoc` saw nothing until the level next
+changed, which on a healthy headset could be hours — a genuine limitation of
+change-only semantics over UDP. Change-only was what was originally asked
+for, so it was built that way and the limitation documented rather than
+silently designed around; the resend is the answer now that the limitation
+has been judged not worth living with.
+
+**Why 5 s, and why it is approximate:** the interval is only ever tested
+against a battery frame, and those arrive about once a second, so it is a
+floor and the real gap is 5–6 s. Precision would buy nothing — the value has
+13 distinct steps — and gating on the frame preserves the startup guarantee
+above. One message per 5 s against ~1800/s for `r` costs nothing.
 
 ---
 

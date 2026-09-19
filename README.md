@@ -246,7 +246,7 @@ epoc --osc 9000 --osc-messages truqg         # raw + quality, no band powers
 | `<prefix>/quality/all` | `<timestamp> <af3> <f7> ...` (14 values) | on refresh, ~34 Hz |
 | `<prefix>/fft/<channel>` | `<timestamp> <delta> <theta> <alpha> <beta> <gamma>` | per spectrum |
 | `<prefix>/gyro/x`, `<prefix>/gyro/y` | `<timestamp> <value>` | per sample, 128 Hz |
-| `<prefix>/battery` | `<timestamp> <level>` | on change only |
+| `<prefix>/battery` | `<timestamp> <level>` | on change, and every 5 s |
 
 Channel names are lowercased in addresses: `/epoc/raw/af3`. The 14 values in
 `/raw/all` are ordered AF3, F7, F3, FC5, T7, P7, O1, O2, P8, T8, FC6, F4, F8,
@@ -327,14 +327,16 @@ Raw and gyro messages are sent per sample (128 Hz). Band messages are sent
 whenever the spectrum is recomputed, which is once per `--refresh` interval
 (default 50 ms, so about 20 Hz), and only once the FFT window has filled.
 
-Battery is the exception: it is sent once the first reading arrives and then
-only when the charge changes, so expect a handful of messages per session
+Battery is the exception: it is sent once the first reading arrives, then
+whenever the charge changes and every 5 s regardless — a slow heartbeat
 rather than a stream. The dongle substitutes a battery reading for the
 sequence counter once a second, so the first value follows the start of the
 stream within a second — it cannot be sent at the same instant, because
-until that frame arrives the level is genuinely unknown. A receiver started
-after `epoc` will therefore see nothing on `/battery` until the charge next
-moves; restart `epoc` if you need the current value.
+until that frame arrives the level is genuinely unknown. The resend is
+checked only on those once-a-second frames, so the gap is 5–6 s in practice;
+that is deliberate, since the level itself moves in coarse steps. A receiver
+started after `epoc` therefore learns the charge within a few seconds,
+without having to wait for it to change.
 
 Mind the packet rate: `r` alone is 14 messages per sample, about 1800
 datagrams/second. If your receiver struggles, use `u` instead of `r` to get one

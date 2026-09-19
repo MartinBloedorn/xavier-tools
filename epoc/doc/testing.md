@@ -112,7 +112,7 @@ Know these gaps before trusting a green run:
   untested. The *parsers* they call (`parse_message_flags`,
   `parse_endpoint`, `parse_timestamp_format`) are well covered, so the gap is
   the wiring, not the logic. `OscStreamer`'s send *cadence* is the largest
-  piece of untested policy: that `/battery` fires on change and
+  piece of untested policy: that `/battery` fires on change and every 5 s, and
   `/quality/all` on refresh has only ever been checked by counting datagrams
   off a live headset.
 - **Linux and macOS.** Never compiled, let alone tested.

@@ -35,7 +35,7 @@ That ordering in `run()` is deliberate; do not move OSC setup below
 | `<prefix>/quality/all` | `<ts> <af3> <f7> …` (14) | on refresh, ≈34 Hz |
 | `<prefix>/fft/<channel>` | `<ts> <delta> <theta> <alpha> <beta> <gamma>` | per spectrum (≈20 Hz) |
 | `<prefix>/gyro/x`, `<prefix>/gyro/y` | `<ts> <value>` | per sample, 128 Hz |
-| `<prefix>/battery` | `<ts> <level>` | on change only |
+| `<prefix>/battery` | `<ts> <level>` | on change, and every 5 s |
 
 Flags, selected by `--osc-messages`, canonical order `tbrugyq`, default
 `tbrgy`:
@@ -68,12 +68,12 @@ so a receiver can route each independently.
 
 ### Battery semantics
 
-Sent when the first reading arrives, and thereafter only when the value
-changes. The trigger is:
+Sent when the first reading arrives, thereafter when the value changes, and
+every `kBatteryResend` (5 s) regardless. The trigger is:
 
 ```cpp
 if (!flags_.battery || !f.is_battery_frame) return;
-if (level == last_battery_) return;
+if (level == last_battery_ && now - last_battery_sent_ < kBatteryResend) return;
 ```
 
 Gating on `is_battery_frame` rather than on the value changing is deliberate.
@@ -83,10 +83,18 @@ startup. The dongle substitutes a reading for the sequence counter once a
 second, so the first real value follows the start of the stream within about a
 second — measured at 1.15 s.
 
-Known consequence: a receiver started *after* `epoc` sees nothing on
-`/battery` until the charge next moves, which on a healthy headset could be a
-long time. Restarting `epoc` is the current answer. A periodic resend was
-deliberately not added; see [decisions](decisions.md#adr-11).
+The resend is gated on that same flag, so it inherits the guarantee: nothing
+is sent before a level has actually been measured. That also makes the
+interval a floor rather than a period — the resend lands on the first battery
+frame at or after 5 s, so the real gap is 5–6 s. Battery moves in 13 coarse
+steps ([protocol](protocol.md)), so nothing is lost to that slack. The timer
+reads `steady_clock`, not the OSC timestamp, so the cadence does not change
+with `--osc-timestamp`.
+
+The resend is what makes `/battery` useful to a receiver that joins
+mid-stream: under change-only semantics it saw nothing until the charge next
+moved, which on a healthy headset could be hours. See
+[decisions](decisions.md#adr-11).
 
 ### Contact quality semantics
 

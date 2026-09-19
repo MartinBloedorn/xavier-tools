@@ -144,10 +144,11 @@ At 128 Hz:
 | `u` | 128 | Same data, one message |
 | `g` | 256 | Two axes |
 | `b` | ~280 | 14 per spectrum, once per `--refresh` (default 50 ms) |
-| `y` | ~0 | On change only; expect one per session |
+| `y` | ~0.2 | On change, plus a resend every 5 s |
 
 A ten-second `tgy` run should produce roughly 1280 gyro-x, 1280 gyro-y and
-exactly one battery message. Counts far off that mean something is wrong.
+two battery messages — one about a second in, the resend about five seconds
+later. Counts far off that mean something is wrong.
 
 ## Editing note
 

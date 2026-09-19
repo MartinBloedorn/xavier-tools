@@ -37,6 +37,16 @@ FFT_WINDOW = 128          # epoc defaults to 256; 128 keeps pure Python cheap
 FFT_INTERVAL = 1.0 / 16.0  # epoc recomputes per display refresh, ~20 Hz
 DC_COUNTS = 8400          # the EPOC's resting offset, about 4.3 mV
 
+# Battery cadence. The dongle substitutes a charge reading for the sequence
+# counter once a second, and epoc tests its resend timer only on one of those
+# frames -- so BATTERY_RESEND is a floor, not a period, and the gap a receiver
+# actually sees is 5-6 s. Modelling the frame rather than the send reproduces
+# that slack. BATTERY_DRIFT is ours alone: real charge moves in 13 coarse
+# steps and can sit on one for hours, which is exactly why epoc resends.
+BATTERY_FRAME = 1.0
+BATTERY_RESEND = 5.0      # epoc's kBatteryResend
+BATTERY_DRIFT = 60.0
+
 
 def fft(values: Sequence[complex]) -> List[complex]:
     """Iterative radix-2 Cooley-Tukey, in place on a copy.
@@ -208,7 +218,12 @@ def main(argv=None) -> int:
     start = time.time()
     sample_index = 0
     next_fft = 0.0
-    next_battery = 0.0
+    # First reading a second in, not at t=0: until a battery frame arrives the
+    # level is genuinely unknown, and epoc will not invent one.
+    next_battery_frame = BATTERY_FRAME
+    next_battery_drift = BATTERY_DRIFT
+    last_battery_sent = None
+    last_battery_time = 0.0
     # The counter cycles 0..127 and is replaced by a battery reading once a
     # second; quality refreshes on 34 of the 129 states. We do not reproduce
     # the selector table, only its rate.
@@ -284,13 +299,22 @@ def main(argv=None) -> int:
                         addr_fft[i], [timetag] + [float(v) for v in bands]), dest)
                     sent += 1
 
-            if t >= next_battery:
-                # Change-only, like the real thing: the first reading lands
-                # about a second in, then it drifts down slowly.
-                next_battery = t + 60.0
-                sock.sendto(osc.encode_message(addr_battery, [timetag, float(battery)]), dest)
-                battery = max(0.0, battery - 0.01)
-                sent += 1
+            if t >= next_battery_frame:
+                # One synthetic battery frame per second, carrying epoc's own
+                # trigger: send when the charge changed, or when the last send
+                # is at least BATTERY_RESEND old. The charge itself only moves
+                # once a minute, so most of these are resends -- which is the
+                # point, since that is what a viewer joining mid-stream gets.
+                next_battery_frame += BATTERY_FRAME
+                if t >= next_battery_drift:
+                    next_battery_drift += BATTERY_DRIFT
+                    battery = max(0.0, battery - 0.01)
+                if battery != last_battery_sent or t - last_battery_time >= BATTERY_RESEND:
+                    sock.sendto(
+                        osc.encode_message(addr_battery, [timetag, float(battery)]), dest)
+                    last_battery_sent = battery
+                    last_battery_time = t
+                    sent += 1
 
             sample_index += 1
     except KeyboardInterrupt:
